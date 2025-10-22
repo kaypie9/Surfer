@@ -6,7 +6,6 @@ import ConnectWallet from '@/components/ConnectWallet';
 
 import { useAccount, useSendTransaction } from 'wagmi';
 import { base } from 'wagmi/chains';
-// import { stringToHex } from 'viem'; // optional if you want to tag tx data
 
 /* ----------------- utils ----------------- */
 const ri = (a: number, b: number) => Math.floor(Math.random() * (b - a + 1)) + a;
@@ -31,12 +30,16 @@ export default function Page() {
   const { sendTransactionAsync } = useSendTransaction();
 
   // Game state
-  const state = useRef<'start' | 'playing' | 'over'>('start');
+  const state = useRef<'start' | 'countdown' | 'playing' | 'over'>('start');
   const score = useRef(0);
   const frames = useRef(0);
   const safeFrames = useRef(0);
   const pipes = useRef<Pipe[]>([]);
   const nextSpawnAt = useRef(60);
+
+  // Countdown
+  const [countdown, setCountdown] = useState<number>(0);
+  const countdownTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Responsive world
   const W = useRef(640);
@@ -45,16 +48,16 @@ export default function Page() {
   const ASPECT = 9 / 16; // portrait width/height
 
   // Difficulty knobs (balanced/fair)
-  const GAP_RANGE: [number, number] = [170, 230];      // wider openings
-  const WIDTH_RANGE: [number, number] = [50, 80];      // slimmer pipes
-  const SPEED_BASE = 2.2;                               // a bit slower
+  const GAP_RANGE: [number, number] = [170, 230];
+  const WIDTH_RANGE: [number, number] = [50, 80];
+  const SPEED_BASE = 2.2;
   const SPEED_JITTER: [number, number] = [-0.1, 0.2];
-  const SPAWN_BASE = 110;                               // more spacing
+  const SPAWN_BASE = 110;
   const SPAWN_JITTER: [number, number] = [0, 30];
-  const CLUSTER_PROB = 0.25;                            // fewer pairs
-  const CLUSTER_OFFSET: [number, number] = [140, 210];  // wider pair spacing
-  const VERTICAL_DRIFT = 25;                            // gentler wander
-  const MIN_H_SPACING = 100;                            // guaranteed px between pipes
+  const CLUSTER_PROB = 0.25;
+  const CLUSTER_OFFSET: [number, number] = [140, 210];
+  const VERTICAL_DRIFT = 25;
+  const MIN_H_SPACING = 100;
 
   // Bird physics
   const GRAVITY = 0.17;
@@ -148,6 +151,7 @@ export default function Page() {
 
       drawBG();
 
+      // Only move the world in 'playing' state
       if (state.current === 'playing') {
         const b = bird.current;
         const _H = H.current, _G = GROUND_H.current, _W = W.current;
@@ -180,14 +184,29 @@ export default function Page() {
         const groundY = _H - _G - b.r;
         if (b.y > groundY && safeFrames.current <= 0) endGame();
       } else {
+        // In 'start', 'countdown', or 'over', just draw pipes without moving them
         pipes.current.forEach(p => p.draw(ctx));
       }
 
       drawBird();
+
+      // Draw countdown overlay if active
+      if (state.current === 'countdown' && countdown > 0) {
+        const _W = W.current, _H = H.current;
+        ctx.fillStyle = 'rgba(0,0,0,0.35)';
+        ctx.fillRect(0, 0, _W, _H);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = `bold ${Math.round(_W * 0.2)}px Arial`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(countdown), _W / 2, _H / 2);
+      }
+
       requestAnimationFrame(step);
     };
 
     function flap() {
+      // Disable flapping until the game is actually playing
       if (state.current !== 'playing') return;
       if (flapCd.current > 0) return;
       bird.current.v = JUMP;
@@ -207,7 +226,7 @@ export default function Page() {
       canvas.removeEventListener('click', onClick);
       document.removeEventListener('keydown', onKey);
     };
-  }, []);
+  }, [countdown]);
 
   /* ---------- request transaction before starting ---------- */
   async function requestGameTx(action: 'play' | 'restart'): Promise<boolean> {
@@ -215,17 +234,60 @@ export default function Page() {
       setHint('Connect wallet first.'); return false;
     }
     try {
-      // Minimal on-chain ping: 0 ETH to self on Base (gas only)
-await sendTransactionAsync({
-  to: address,
-  // value: 0n,          // ← delete this line
-  chainId: base.id,
-});
+      // Minimal on-chain ping: 0 ETH to self on Base (gas only).
+      await sendTransactionAsync({
+        to: address,
+        // value: BigInt(0), // not required; defaults to 0
+        chainId: base.id,
+      });
       return true;
     } catch {
       setHint('Transaction canceled.');
       return false;
     }
+  }
+
+  /* ---------- countdown helpers ---------- */
+  function stopCountdown() {
+    if (countdownTimer.current) {
+      clearInterval(countdownTimer.current);
+      countdownTimer.current = null;
+    }
+    setCountdown(0);
+  }
+
+  function startCountdownThenPlay() {
+    // Prepare bird, world, and UI, but DO NOT move yet.
+    state.current = 'countdown';
+    setHint('Get ready…');
+    pipes.current = [];
+    score.current = 0;
+    frames.current = 0;
+    safeFrames.current = 90; // grace will apply after countdown ends
+    flapCd.current = 0;
+    setScoreText('0');
+    bird.current.x = Math.round(W.current * 0.18);
+    bird.current.y = H.current * 0.4;
+    bird.current.v = 0;
+    bird.current.r = Math.max(12, Math.round(W.current * 0.03));
+    nextSpawnAt.current = frames.current + 55; // first pipe appears ~1s into the run
+
+    // Start 3 -> 2 -> 1 countdown
+    setCountdown(3);
+    stopCountdown();
+    countdownTimer.current = setInterval(() => {
+      setCountdown((c) => {
+        if (c <= 1) {
+          // done
+          stopCountdown();
+          // Now actually start playing
+          state.current = 'playing';
+          setHint(`Fly, @${viewer.username}!`);
+          return 0;
+        }
+        return c - 1;
+      });
+    }, 1000);
   }
 
   /* ---------- spawning ---------- */
@@ -287,25 +349,17 @@ await sendTransactionAsync({
       const data = (await r.json()) as LeaderRow[]; setLeader(data); } catch {}
   }
 
-  /* ---------- controls (now gated by tx) ---------- */
+  /* ---------- controls (tx → countdown → play) ---------- */
   async function startGame() {
     const ok = await requestGameTx('play');
     if (!ok) return;
-
-    state.current = 'playing';
-    setHint(`Fly, @${viewer.username}!`);
-    pipes.current = []; score.current = 0; frames.current = 0;
-    safeFrames.current = 90; flapCd.current = 0; setScoreText('0');
-    bird.current.x = Math.round(W.current * 0.18);
-    bird.current.y = H.current * 0.4; bird.current.v = 0;
-    bird.current.r = Math.max(12, Math.round(W.current * 0.03));
-    nextSpawnAt.current = frames.current + 55;
+    startCountdownThenPlay();
   }
 
   async function restartGame() {
     const ok = await requestGameTx('restart');
     if (!ok) return;
-    await startGame();
+    startCountdownThenPlay();
   }
 
   function endGame() {

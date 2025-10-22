@@ -8,10 +8,10 @@ const ROOT = process.env.NEXT_PUBLIC_URL || 'https://flippybirdgame.vercel.app';
 // your known-good association values (fallbacks)
 const FALLBACK = {
   header:
-    'eyJmaWQiOjUzNjY0NiwidHlwZSI6ImF1dGgiLCJrZXkiOiIweGY0RjYxQkMyNmQyRmVkMDJCRUU4MkU4OEVGQTREOWFjMDAyYzMxODUifQ',
-  payload: 'eyJkb21haW4iOiJmbGlwcHliaXJkZ2FtZS52ZXJjZWwuYXBwIn0',
+    'eyJmaWQiOjUyNzU5OSwidHlwZSI6ImF1dGgiLCJrZXkiOiIweGEwRTE5NjU2MzIxQ2FCYUY0NmQ0MzRGYTcxQjI2M0FiQjY5NTlGMDcifQ',
+  payload: 'eyJkb21haW4iOiJmbGlwcHliaXJkZ2FtZS10d28udmVyY2VsLmFwcCJ9',
   signature:
-    'T0UFQAn0TivI7Duu5GMy4ZtMF0VfpxHztoEI0SF1ypBGzDu1STFwbpuh/5PDUwSQkV9eUwHYSJ1jdLPah99lChs=',
+    'TpbbMDa5/dS996BcA0G4slcUaJZfV4Hu4TkCQIgAVXlMlnrHxfGFY+Tfd6fQBM8bRSyQAP7+fxGRZ9dnNVMjaRs="',
 };
 
 export async function GET() {
@@ -20,8 +20,27 @@ export async function GET() {
   const signature =
     process.env.NEXT_PUBLIC_FARCASTER_SIGNATURE || FALLBACK.signature;
 
+      // --- Base Builder block (owner required; allowed optional) ---
+  const ownerAddress =
+    process.env.NEXT_PUBLIC_BASE_BUILDER_OWNER ||
+    '0x488298039c374f013C21a8C16b5c6bEeEC4eDC0a'; // <- your owner
+  // Optional: comma-separated list of additional builder addresses
+  const allowedCsv = (process.env.NEXT_PUBLIC_BASE_BUILDER_ALLOWED || '').trim();
+  const allowedAddresses = allowedCsv
+    ? allowedCsv.split(',').map((s) => s.trim()).filter(Boolean)
+    : undefined;
+
+    
   return NextResponse.json({
     accountAssociation: { header, payload, signature },
+
+        // 👇 add this block
+    baseBuilder: {
+      ownerAddress,
+      ...(allowedAddresses?.length ? { allowedAddresses } : {}),
+    },
+
+
     miniapp: {
       version: '1',
       name: 'Flappy Mini',
