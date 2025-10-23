@@ -259,10 +259,10 @@ const riskUntilRef   = useRef(0);
 const flyUntilRef    = useRef(0);
 
 // flight coin control
+const invincibleUntilRef = useRef(0);   // post-hit grace window
 const flyRowsLeftRef = useRef(0);       // how many rows we still may spawn this flight
-const flySpawnCooldownRef = useRef(0);  // small delay between sky rows
+const flySpawnCooldownRef = useRef(0);  // pacing between sky rows
 
-const invincibleUntilRef = useRef(0); // post-hit grace window
 const [lives, setLives] = useState(3);
 const livesRef = useRef(3);
 useEffect(() => { livesRef.current = lives; }, [lives]);
@@ -1394,21 +1394,19 @@ if (orbs.filter(o => o.active).length < 12) {
   spawnOrb(Math.min(lastZ, -10) - 9 - Math.random() * 6);
 }
 
-// Extra gold rows in the sky while flying (rate-limited + capped)
-if (inSky) {
-  // end-of-flight cleanup stops further rows
-  if (now >= flyUntilRef.current) {
-    flyRowsLeftRef.current = 0;
-  } else if (flyRowsLeftRef.current > 0 && now >= flySpawnCooldownRef.current) {
-    const lastZ = orbs.reduce((min, o) => (o.active ? Math.min(min, o.mesh.position.z) : min), -10);
-    const zRow = Math.min(lastZ, -10) - 7;    // keep a bit ahead
-    spawnSkyRow(zRow);
-    flyRowsLeftRef.current--;
-    flySpawnCooldownRef.current = now + 140;  // ~7 rows per second max
+// Extra gold rows in the sky while flying (limited + paced)
+if (inSky && flyRowsLeftRef.current > 0) {
+  // pace new rows every ~180ms so they stream toward you
+  if (now >= flyRowCooldownRef.current) {
+    // place the next row a bit ahead of the closest-in-front orb row
+    const lastZ = orbs.reduce((min, o) => (o.active ? Math.min(min, o.mesh.position.z) : min), -2);
+    const nextZ = Math.min(lastZ, -2) - 4; // keep rows near camera, not far away
+    spawnSkyRow(nextZ);
+
+    flyRowsLeftRef.current -= 1;
+    flyRowCooldownRef.current = now + 180; // pacing interval (tweakable)
   }
 }
-
-
     // --- powers ---
     for (const pwr of powers) {
       if (!pwr.active) continue;
