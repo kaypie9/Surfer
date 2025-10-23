@@ -167,6 +167,7 @@ const mountRef = useRef<HTMLDivElement | null>(null);
 const cleanupRef = useRef<(() => void) | null>(null);
 const rafRef = useRef<RAF>(null);
 const startedRef = useRef(false); // ← prevents double start
+const flyNextZRef = useRef(-4); // next sky row z; -4 is near the camera
 
   // game state
   const [running, setRunning] = useState(false);
@@ -259,10 +260,10 @@ const riskUntilRef   = useRef(0);
 const flyUntilRef    = useRef(0);
 
 // flight coin control
-const invincibleUntilRef = useRef(0);   // post-hit grace window
 const flyRowsLeftRef = useRef(0);       // how many rows we still may spawn this flight
-const flySpawnCooldownRef = useRef(0);  // pacing between sky rows
-
+const flySpawnCooldownRef = useRef(0);  // small delay between sky rows
+const invincibleUntilRef = useRef(0); // post-hit grace window
+const wasFlyingRef = useRef(false);
 const [lives, setLives] = useState(3);
 const livesRef = useRef(3);
 useEffect(() => { livesRef.current = lives; }, [lives]);
@@ -270,6 +271,11 @@ useEffect(() => { livesRef.current = lives; }, [lives]);
   const lastPickupAtRef = useRef(0);
   const comboRef = useRef(0);
   const lastSpeedRef = useRef(0);
+
+// --- Subway Surfers chase-cam helpers ---
+const camBobRef     = useRef(0);
+const lookTargetRef = useRef(new THREE.Vector3(0, 1.2, -8));
+const prevXRef      = useRef(0);
 
 // live flags for handlers/loop (avoid stale closures)
 const pausedRef = useRef(false);
@@ -422,9 +428,12 @@ const rand = mulberry32((dailySeed ^ 0xB055) ^ runSalt);
     scene.fog = new THREE.Fog(colors.fog[0], colors.fog[1], colors.fog[2]);
 
 const camera = new THREE.PerspectiveCamera(FIXED_FOV, W / H, 0.1, 500);
-// lift camera slightly higher and tilt down to see more track
-camera.position.set(0, 2.8, 6.5);
-camera.rotation.x = -0.25; // ~14 degrees down
+// Subway Surfers–style starting pose: slightly higher + behind
+camera.position.set(0, 3.2, 7.2);
+camera.rotation.set(0, 0, 0);
+camera.fov = 62;
+camera.updateProjectionMatrix();
+
 
 
     const renderer = new THREE.WebGLRenderer({ antialias: quality >= 2, alpha: true });
@@ -799,7 +808,8 @@ function spawnObstacleWithType(zPos: number, forcingLaneIdx: number, type: Obsta
 function spawnObstacle(zPos: number) {
   const laneX = lanes[Math.floor(rand() * lanes.length)];
   const isAir = rand() < (0.45 + 0.3 * diffFactor());
-const geo = (isAir ? airShapes : groundShapes)[Math.floor(rand() *  airShapes.length)];
+const pool = isAir ? airShapes : groundShapes;
+const geo = pool[Math.floor(rand() * pool.length)];
   const mat = isAir ? obsAirMat : obsGroundMat;
 
   const m = new THREE.Mesh(geo, mat);
@@ -856,9 +866,16 @@ const geo = (isAir ? airShapes : groundShapes)[Math.floor(rand() *  airShapes.le
       orbs.push({ mesh: m, aabb: sphere, active: true, z: zPos });
     }
 
-    function spawnSkyRow(zPos: number) {
+function spawnSkyRow(zPos: number) {
   const ySky = 2.5;
-  for (const x of [-1.2, 0, 1.2]) {
+  const lanes = [-1.2, 0, 1.2];
+
+  // choose 1 or 2 random lanes (never all 3)
+  const shuffled = lanes.sort(() => Math.random() - 0.5);
+  const count = Math.random() < 0.55 ? 1 : 2; // 55% one coin, 45% two coins
+
+  for (let i = 0; i < count; i++) {
+    const x = shuffled[i];
     const m = new THREE.Mesh(orbGeo, orbMat);
     m.position.set(x, ySky, zPos);
     scene.add(m);
@@ -867,21 +884,18 @@ const geo = (isAir ? airShapes : groundShapes)[Math.floor(rand() *  airShapes.le
   }
 }
 
-// Start a 3s flight and pre-spawn a few sky rows immediately
-function startFlight(now: number) {
-  flyUntilRef.current = now + 3000;   // 3 seconds
-  flyRowsLeftRef.current = 12;        // hard cap of rows per flight
-  flySpawnCooldownRef.current = 0;
 
-  // spawn 3 rows right away so coins are visible instantly
-  const lastZ = orbs.reduce((min, o) => (o.active ? Math.min(min, o.mesh.position.z) : min), -10);
-  let z = Math.min(lastZ, -10) - 6;
-  for (let i = 0; i < 3 && flyRowsLeftRef.current > 0; i++) {
-    spawnSkyRow(z);
-    z -= 6;
-    flyRowsLeftRef.current--;
-  }
+// Start a 3s flight and pre-spawn rows right by the camera
+// Start a 5s flight; sky coins begin 1.5s after liftoff
+function startFlight(now: number) {
+  flyUntilRef.current = now + 5000;       // 5 seconds
+  flyRowsLeftRef.current = 14;            // limit rows per flight
+  flySpawnCooldownRef.current = now + 1500; // first sky row 1.5s after liftoff
+
+  flyNextZRef.current = -4;               // spawn first row right near the camera
 }
+
+
 
     const powers: Power[] = [];
 // ---- Power geo + materials (must be before spawnPower) ----
@@ -911,27 +925,28 @@ const matHeart = new THREE.MeshStandardMaterial({
 
 // ---- Spawner (uses the materials above) ----
 function spawnPower(zPos: number) {
-const laneX = lanes[Math.floor(rand() * lanes.length)];
-const r = rand();
+  const laneX = lanes[Math.floor(rand() * lanes.length)];
+  const r = rand();
 
 // TEMP: force wings to test
 const FORCE_WINGS = true; // ← set to false when done testing
 
-const kind: PowerKind = FORCE_WINGS ? 'wings' :
-  r < 0.15 ? 'magnet' :
-  r < 0.30 ? 'boost'  :
-  r < 0.45 ? 'shield' :
-  r < 0.60 ? 'double' :
-  r < 0.85 ? 'wings'  :
-  r < 0.93 ? 'heart'  : 'risk';
+  // 8% risk, 6% wings, 3% heart, rest distributed across the classics
+  const kind: PowerKind = FORCE_WINGS ? 'wings' :
+    r < 0.26 ? 'magnet' :
+    r < 0.52 ? 'boost'  :
+    r < 0.74 ? 'shield' :
+    r < 0.89 ? 'double' :
+    r < 0.82 ? 'wings'  :
+    r < 0.98 ? 'heart'  : 'risk';
 
-const mat =
-  kind === 'magnet' ? matMagnet :
-  kind === 'boost'  ? matBoost  :
-  kind === 'shield' ? matShield :
-  kind === 'double' ? matDouble :
-  kind === 'wings'  ? matWings  :
-  kind === 'heart'  ? matHeart  : matRisk;
+  const mat =
+    kind === 'magnet' ? matMagnet :
+    kind === 'boost'  ? matBoost  :
+    kind === 'shield' ? matShield :
+    kind === 'double' ? matDouble :
+    kind === 'wings'  ? matWings  :
+    kind === 'heart'  ? matHeart  : matRisk;
 
   const m = new THREE.Mesh(ico, mat);
   m.position.set(laneX, 0.9, zPos);
@@ -1098,6 +1113,21 @@ if (pausedRef.current) {
     fpsSmoothed = fpsSmoothed * 0.9 + instantFPS * 0.1;
     lastFrameTime = now;
 const inSky = now < flyUntilRef.current;
+if (inSky) {
+  wasFlyingRef.current = true;
+} else if (wasFlyingRef.current) {
+  // just landed — cancel any pending sky rows
+flyRowsLeftRef.current = 0;
+flySpawnCooldownRef.current = 0;
+wasFlyingRef.current = false;
+  // optional: remove any sky coins that are still around
+  for (const orb of orbs) {
+    if (orb.active && orb.mesh.position.y > 1.5) {
+      orb.active = false;
+      scene.remove(orb.mesh);
+    }
+  }
+}
 
     if (fpsSmoothed < TARGET_FPS - 8) {
       renderer.shadowMap.enabled = false;
@@ -1115,6 +1145,54 @@ const inSky = now < flyUntilRef.current;
 const riskSpeedMult = now < riskUntilRef.current ? 1.25 : 1.0;
 const scrollSpeedBase = (baseSpeed + (t * (accel + extra))) * speedMult * riskSpeedMult;
     const scrollSpeed = scrollSpeedBase * slowmo * (assist ? 0.92 : 1);
+    // --- Subway Surfers style chase camera ---
+
+// Tunables
+const baseY = 3.2;           // base camera height
+const baseZ = 7.2;           // distance behind player
+const xFollow = 0.60;        // how much cam X follows player X
+const lagPos = 0.12;         // damping for X
+const lagY   = 0.10;         // damping for Y
+const lagZ   = 0.08;         // damping for Z
+const lookAheadZ = -8.0;     // look target depth (ahead on track)
+const lookAheadX = 0.75;     // look target follows player X
+const bobAmp = 0.05;         // vertical bob amplitude
+const bankScale = 1.6;       // roll intensity on lane change
+const bankClamp = 0.20;      // max roll (radians)
+
+// subtle bob
+camBobRef.current += Math.max(0.001, dt / 1000) * 6; // ~6 Hz
+const bob = Math.sin(camBobRef.current * Math.PI * 2) * bobAmp;
+
+// desired pose
+const desiredX = player.position.x * xFollow;
+const desiredY = baseY + bob + Math.min(0.7, scrollSpeed * 0.9);
+const desiredZ = baseZ;
+
+// damped move
+camera.position.x += (desiredX - camera.position.x) * lagPos;
+camera.position.y += (desiredY - camera.position.y) * lagY;
+camera.position.z += (desiredZ - camera.position.z) * lagZ;
+
+// look ahead down the lane
+lookTargetRef.current.set(player.position.x * lookAheadX, 1.2, lookAheadZ);
+camera.lookAt(lookTargetRef.current);
+
+// bank (roll) from lateral velocity
+const vx = player.position.x - prevXRef.current;
+prevXRef.current = player.position.x;
+const targetBank = THREE.MathUtils.clamp(-vx * bankScale, -bankClamp, bankClamp);
+camera.rotation.z = THREE.MathUtils.lerp(camera.rotation.z, targetBank, 0.12);
+
+// mild pitch, mostly stable
+const targetPitch = -0.26 - Math.min(0.06, scrollSpeed * 0.10);
+camera.rotation.x = THREE.MathUtils.lerp(camera.rotation.x, targetPitch, 0.08);
+
+// boost FOV effect (keep your BOOST_FOV_DELTA)
+const baseFov = 62;
+const targetFovCam = baseFov + (now < boostUntilRef.current ? BOOST_FOV_DELTA : 0);
+camera.fov += (targetFovCam - camera.fov) * 0.06;
+camera.updateProjectionMatrix();
     lastSpeedRef.current = scrollSpeed;
 // --- background sky transition based on speed & combo ---
 if (mountRef.current) {
@@ -1140,8 +1218,7 @@ if (mountRef.current) {
 }
 
     // ⭐ combo perks
-if (comboRef.current >= 3) {
-  // soft “auto-magnet” while you hold x3+
+if (!inSky && comboRef.current >= 3) {
   magnetUntilRef.current = Math.max(magnetUntilRef.current, now + 180);
 }
 if (comboRef.current >= 4) {
@@ -1149,9 +1226,6 @@ if (comboRef.current >= 4) {
   timeWarpUntilRef.current = Math.max(timeWarpUntilRef.current, now + 120);
 }
 
-    // dynamic camera tilt to see more ahead
-    camera.position.y = 2.8 + Math.min(0.8, scrollSpeed * 1.2);
-    camera.rotation.x = -0.22 - Math.min(0.15, scrollSpeed * 0.3);
 
 // FOV zoom while boosting
 const targetFov = FIXED_FOV + (now < boostUntilRef.current ? BOOST_FOV_DELTA : 0);
@@ -1231,7 +1305,6 @@ const weatherTarget = 0.4 + 0.4 * diffFactor();
     const maxStep = maxSpeed * dtSec;
     const step = Math.sign(dx) * Math.min(Math.abs(dx), maxStep);
     player.position.x += step;
-    camera.rotation.z = THREE.MathUtils.lerp(camera.rotation.z, -step * 0.9, 0.25);
     if (Math.abs(targetX - player.position.x) < maxStep) player.position.x = targetX;
 
  // --- jump / gravity / slide ---
@@ -1351,7 +1424,7 @@ for (const orb of orbs) {
   orb.mesh.rotation.y += 0.05;
 
   // soft magnet
-  if (now < magnetUntilRef.current) {
+if (!inSky && now < magnetUntilRef.current) {
     const dMag = orb.mesh.position.distanceTo(player.position);
     const magnetRadius = MAGNET_RADIUS * (1 + upg.magnet * 0.06);
     if (dMag < magnetRadius) {
@@ -1361,8 +1434,9 @@ for (const orb of orbs) {
   }
 
   // pickup collision
-  const d = player.position.distanceTo(orb.mesh.position);
-  if (d < 0.45) {
+const d = player.position.distanceTo(orb.mesh.position);
+const eatR = 0.45;
+if (d < eatR) {
     orb.active = false;
     scene.remove(orb.mesh);
 
@@ -1394,19 +1468,21 @@ if (orbs.filter(o => o.active).length < 12) {
   spawnOrb(Math.min(lastZ, -10) - 9 - Math.random() * 6);
 }
 
-// Extra gold rows in the sky while flying (limited + paced)
-if (inSky && flyRowsLeftRef.current > 0) {
-  // pace new rows every ~180ms so they stream toward you
-  if (now >= flyRowCooldownRef.current) {
-    // place the next row a bit ahead of the closest-in-front orb row
-    const lastZ = orbs.reduce((min, o) => (o.active ? Math.min(min, o.mesh.position.z) : min), -2);
-    const nextZ = Math.min(lastZ, -2) - 4; // keep rows near camera, not far away
+// Extra gold rows in the sky while flying (near-camera, capped, paced)
+if (inSky) {
+  if (now >= flyUntilRef.current) {
+    flyRowsLeftRef.current = 0;
+  } else if (flyRowsLeftRef.current > 0 && now >= flySpawnCooldownRef.current) {
+    // spawn at the cursor near the camera, then march forward
+    const nextZ = flyNextZRef.current;
     spawnSkyRow(nextZ);
-
-    flyRowsLeftRef.current -= 1;
-    flyRowCooldownRef.current = now + 180; // pacing interval (tweakable)
+    flyNextZRef.current -= 3.6;            // spacing between rows
+    flyRowsLeftRef.current--;
+    flySpawnCooldownRef.current = now + 150; // pace: ~6-7 rows/sec
   }
 }
+
+
     // --- powers ---
     for (const pwr of powers) {
       if (!pwr.active) continue;
@@ -1417,6 +1493,7 @@ if (inSky && flyRowsLeftRef.current > 0) {
     if (powers.filter(p => p.active).length < 4 && Math.random() < 0.02) {
       const lastZ = powers.reduce((min, o) => (o.active ? Math.min(min, o.mesh.position.z) : min), 0);
       spawnPower(Math.min(lastZ, -25) - 20 - Math.random() * 20);
+      
     }
 
     // --- crystals ---
