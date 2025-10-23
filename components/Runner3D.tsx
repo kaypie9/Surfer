@@ -3,8 +3,11 @@
 
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
+import { Howl, Howler } from 'howler';
 
 // RNG seeded by daily seed / world seed
+function lerp(a: number, b: number, t: number) { return a + (b - a) * t; }
+function hsl(h: number, s: number, l: number) { return `hsl(${h} ${s}% ${l}%)`; }
 function mulberry32(a: number) {
   return function () {
     let t = (a += 0x6D2B79F5);
@@ -100,8 +103,12 @@ const WORLD_THEMES: Record<WorldTheme, any> = {
 // player + movement
 const PLAYER_RADIUS = 0.36;
 const PLAYER_GROUND_Y = 0.5;
-const JUMP_STRENGTH_BASE = 0.22;
+const JUMP_STRENGTH_BASE = 0.2;
 const GRAVITY = 0.01;
+
+// Air obstacle tuning (harder to clear with single jump)
+const AIR_OBS_H = 1.2;   // was ~0.9
+const AIR_OBS_Y = 1.35;  // was ~1.0–1.05
 
 // slide (manual; ends after duration)
 const SLIDE_COOLDOWN_MS = 200;
@@ -122,6 +129,12 @@ const BOOST_MS = 6_000;
 const SHIELD_MS = 12_000;
 const DOUBLE_MS = 8_000;
 
+// 🔮 risk / reward
+const RISK_MS = 10_000;         // double points + +25% speed for 10s
+// camera FX
+const BOOST_FOV_DELTA = 6;      // extra FOV during boost
+const SHAKE_MAG = 0.06;         // small shake on pickups/hits
+
 // magnet + boost params
 const MAGNET_RADIUS = 2.2;
 const MAGNET_PULL = 0.06;
@@ -138,7 +151,7 @@ const TARGET_FPS = 58;
 type ObstacleType = 'ground' | 'air';
 type Obs = { mesh: THREE.Mesh; aabb: THREE.Box3; active: boolean; type: ObstacleType };
 type Orb = { mesh: THREE.Mesh; aabb: THREE.Sphere; active: boolean; z: number };
-type PowerKind = 'magnet' | 'boost' | 'shield' | 'double';
+type PowerKind = 'magnet' | 'boost' | 'shield' | 'double' | 'risk' | 'wings' | 'heart';
 type Power = { mesh: THREE.Mesh; aabb: THREE.Sphere; active: boolean; kind: PowerKind };
 type Crystal = { mesh: THREE.Mesh; active: boolean };
 
@@ -149,13 +162,11 @@ export default function Runner3D({
   countdownSeconds = 2,
 }: Props) {
   // mounts & raf
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const mountRef = useRef<HTMLDivElement | null>(null);
-  const cleanupRef = useRef<(() => void) | null>(null);
-  const rafRef = useRef<RAF>(null);
-
-  // game mode
-  const [mode, setMode] = useState<'endless' | 'boss' | 'daily'>('endless');
+const containerRef = useRef<HTMLDivElement | null>(null);
+const mountRef = useRef<HTMLDivElement | null>(null);
+const cleanupRef = useRef<(() => void) | null>(null);
+const rafRef = useRef<RAF>(null);
+const startedRef = useRef(false); // ← prevents double start
 
   // game state
   const [running, setRunning] = useState(false);
@@ -165,6 +176,13 @@ export default function Runner3D({
   const [best, setBest] = useState(0);
   const [speedView, setSpeedView] = useState(0);
   const [countdown, setCountdown] = useState<number | null>(null);
+  const [showTitle, setShowTitle] = useState(true);
+
+// Audio (init on user gesture only)
+const audioReadyRef = useRef(false);
+const sfxRef = useRef<{
+  jump?: Howl; pickup?: Howl; slide?: Howl; hit?: Howl; boost?: Howl; music?: Howl;
+} | null>(null);
 
   // assists + upgrades
   const [assist, setAssist] = useState(false);
@@ -186,6 +204,25 @@ export default function Runner3D({
 
   // Share replay toggle
   const [canShare, setCanShare] = useState(false);
+const [showBoard, setShowBoard] = useState(false);
+const [board, setBoard] = useState<{score:number; at:number}[]>([]);
+
+function loadBoard() {
+  try {
+    const raw = localStorage.getItem('hyper-board');
+    const arr = raw ? JSON.parse(raw) as {score:number; at:number}[] : [];
+    setBoard(arr.sort((a,b)=>b.score-a.score).slice(0, 20));
+  } catch {}
+}
+function saveScoreLocal(score:number) {
+  try {
+    const raw = localStorage.getItem('hyper-board');
+    const arr = raw ? JSON.parse(raw) as {score:number; at:number}[] : [];
+    arr.push({ score, at: Date.now() });
+    localStorage.setItem('hyper-board', JSON.stringify(arr));
+  } catch {}
+}
+useEffect(() => { loadBoard(); }, []);
 
   // Beat clock
   const beatRef = useRef(0);
@@ -193,6 +230,18 @@ export default function Runner3D({
   // UI state
   const [showSettings, setShowSettings] = useState(false);
   const [quality, setQuality] = useState<number>(2);
+const SHOW_SETTINGS = false; // 👈 hide Settings UI in modes
+
+  // idle-preload lightweight audio files so first play is snappy
+useEffect(() => {
+  const idle = (window as any).requestIdleCallback || ((cb: any) => setTimeout(cb, 400));
+  const cancel = (window as any).cancelIdleCallback || clearTimeout;
+  const id = idle(() => {
+    ['/sounds/jump.mp3','/sounds/pickup.mp3','/sounds/slide.mp3','/sounds/hit.mp3','/sounds/boost.mp3','/sounds/theme.mp3']
+      .forEach(src => { const a = new Audio(); a.preload = 'auto'; a.src = src; a.load(); });
+  });
+  return () => cancel(id);
+}, []);
 
   // worlds
   const [world, setWorld] = useState<WorldTheme>('neonCity');
@@ -206,10 +255,29 @@ export default function Runner3D({
   const boostUntilRef = useRef(0);
   const shieldUntilRef = useRef(0);
   const doubleUntilRef = useRef(0);
+const riskUntilRef   = useRef(0); 
+const flyUntilRef    = useRef(0);
+
+// flight coin control
+const flyRowsLeftRef = useRef(0);       // how many rows we still may spawn this flight
+const flySpawnCooldownRef = useRef(0);  // small delay between sky rows
+
+const invincibleUntilRef = useRef(0); // post-hit grace window
+const [lives, setLives] = useState(3);
+const livesRef = useRef(3);
+useEffect(() => { livesRef.current = lives; }, [lives]);
 
   const lastPickupAtRef = useRef(0);
   const comboRef = useRef(0);
   const lastSpeedRef = useRef(0);
+
+// live flags for handlers/loop (avoid stale closures)
+const pausedRef = useRef(false);
+const deadRef   = useRef(false);
+
+useEffect(() => { pausedRef.current = paused; }, [paused]);
+useEffect(() => { deadRef.current   = dead;   }, [dead]);
+
 
   // chain boost tracking
   const chainTimesRef = useRef<number[]>([]);
@@ -225,6 +293,12 @@ export default function Runner3D({
 
   // theme colors
   const colors = useMemo(() => WORLD_THEMES[world], [world]);
+
+  function pickRandomWorld(exclude?: WorldTheme): WorldTheme {
+  const worlds: WorldTheme[] = ['neonCity', 'inkVoid', 'frostCavern', 'desertDusk'];
+  const pool = exclude ? worlds.filter(w => w !== exclude) : worlds;
+  return pool[Math.floor(Math.random() * pool.length)];
+}
 
   // Daily seed & streak once on mount
   useEffect(() => {
@@ -265,11 +339,11 @@ export default function Runner3D({
   }, [world]);
 
   // auto-rotate worlds on mount
-  useEffect(() => {
-    const worlds: WorldTheme[] = ['neonCity', 'inkVoid', 'frostCavern', 'desertDusk'];
-    const next = worlds[Math.floor(Math.random() * worlds.length)];
-    setWorld(next);
-  }, []);
+useEffect(() => {
+  const worlds: WorldTheme[] = ['neonCity', 'inkVoid', 'frostCavern', 'desertDusk'];
+  const next = worlds[Math.floor(Math.random() * worlds.length)];
+  setWorld(next);
+}, []); // ← run once, not when running flips
 
   // countdown
   const startCountdown = useCallback(() => setCountdown(countdownSeconds), [countdownSeconds]);
@@ -285,12 +359,15 @@ export default function Runner3D({
     }
   }, [countdown]);
 
-  // pause on blur
-  useEffect(() => {
-    const onBlur = () => setPaused(true);
-    window.addEventListener('blur', onBlur);
-    return () => window.removeEventListener('blur', onBlur);
-  }, []);
+// safer pause: only pause when the tab is hidden
+useEffect(() => {
+  const onVis = () => {
+    if (document.hidden) setPaused(true);
+  };
+  document.addEventListener('visibilitychange', onVis);
+  return () => document.removeEventListener('visibilitychange', onVis);
+}, []);
+
 
   // helpers
   function makeGridTexture(color = colors.grid, sizePx = 256, gap = 16) {
@@ -319,31 +396,39 @@ export default function Runner3D({
     return new THREE.CanvasTexture(c);
   }
 
-  const startGame = useCallback(() => {
-    if (!mountRef.current) return;
+const startGame = useCallback(() => {
+  if (!mountRef.current) return;
 
-    const W = size.w;
-    const H = size.h;
-    const mount = mountRef.current;
+  // prevent starting twice
+  if (startedRef.current) return;
+  startedRef.current = true;
 
-    // seeded RNG (daily or endless/boss)
-    const rand = mulberry32(
-      mode === 'endless'
-        ? (Date.now() >>> 0)
-        : mode === 'boss'
-        ? (dailySeed ^ 0xB055)
-        : dailySeed
-    );
+  const W = size.w;
+  const H = size.h;
+  const mount = mountRef.current;
+
+// Hybrid mode RNG — mix dailySeed with a per-run salt
+const runSalt = (Date.now() >>> 0);
+const rand = mulberry32((dailySeed ^ 0xB055) ^ runSalt);
+
+
+  // (keep the rest of your startGame code after this line unchanged…)
+
+
+  // (keep the rest of your startGame code after this line unchanged…)
 
     // scene/camera/renderer
     const scene = new THREE.Scene();
     scene.fog = new THREE.Fog(colors.fog[0], colors.fog[1], colors.fog[2]);
 
-    const camera = new THREE.PerspectiveCamera(FIXED_FOV, W / H, 0.1, 500);
-    camera.position.set(0, 2.1, 6);
+const camera = new THREE.PerspectiveCamera(FIXED_FOV, W / H, 0.1, 500);
+// lift camera slightly higher and tilt down to see more track
+camera.position.set(0, 2.8, 6.5);
+camera.rotation.x = -0.25; // ~14 degrees down
+
 
     const renderer = new THREE.WebGLRenderer({ antialias: quality >= 2, alpha: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, quality));
+renderer.setPixelRatio(Math.min((window.devicePixelRatio || 1), quality, 2));
     renderer.setSize(W, H);
     renderer.shadowMap.enabled = quality >= 2;
     mount.innerHTML = '';
@@ -352,23 +437,13 @@ export default function Runner3D({
     // --- WebAudio micro fx ---
     const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
     // guard for autoplay policies
-    let audioCtx: AudioContext | null = null;
-    try { audioCtx = new AudioCtx(); } catch {}
-    function beep(freq: number, durMs: number, type: OscillatorType, gainVal: number) {
-      if (!audioCtx) return;
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.type = type; osc.frequency.value = freq;
-      gain.gain.value = gainVal;
-      osc.connect(gain); gain.connect(audioCtx.destination);
-      osc.start();
-      setTimeout(() => { try { osc.stop(); } catch {} }, durMs);
-    }
-    const playJump   = () => beep(420, 120, 'sine', 0.05);
-    const playPickup = () => beep(880, 90, 'triangle', 0.05);
-    const playSlide  = () => beep(220, 80, 'sawtooth', 0.03);
-    const playHit    = () => beep(120, 140, 'square', 0.06);
-    const playBoost  = () => beep(600, 300, 'sawtooth', 0.05);
+// ---- SFX stubs (actual Howl instances are created on first Start click) ----
+const playJump   = () => sfxRef.current?.jump?.play();
+const playPickup = () => sfxRef.current?.pickup?.play();
+const playSlide  = () => sfxRef.current?.slide?.play();
+const playHit    = () => sfxRef.current?.hit?.play();
+const playBoost  = () => sfxRef.current?.boost?.play();
+
 
     // Minimal layered music without Howler
     const musicFiles = ['bass.mp3', 'pads.mp3', 'arps.mp3', 'drums.mp3'];
@@ -385,13 +460,22 @@ export default function Runner3D({
     function stopMusic() {
       tracks.forEach(a => { a.pause(); a.currentTime = 0; });
     }
-    function updateMusic(speedMult: number, comboMult: number) {
-      const intensity = Math.min(1.5, speedMult + comboMult * 0.1);
-      tracks[0].volume = 0.25 + 0.2 * intensity; // bass
-      tracks[1].volume = 0.2 + 0.12 * intensity; // pads
-      tracks[2].volume = Math.min(0.45, 0.08 + comboMult * 0.05); // arps
-      tracks[3].volume = speedMult > 1 ? 0.5 : 0.18; // drums
-    }
+function updateMusic(speedMult: number, comboMult: number) {
+  const c = Math.min(5, comboMult);
+  const boosting = speedMult > 1.01;
+
+  // bass / pads follow overall intensity
+  const intensity = Math.min(1.6, (boosting ? 1.0 : 0.7) + c * 0.15);
+  tracks[0].volume = 0.22 + 0.22 * intensity;          // bass
+  tracks[1].volume = 0.18 + 0.14 * intensity;          // pads
+
+  // arps come up from combo 3+
+  tracks[2].volume = c >= 3 ? Math.min(0.55, 0.15 + c * 0.08) : 0.0;
+
+  // drums punch on boost
+  tracks[3].volume = boosting ? 0.55 : 0.20;
+}
+
     setCanShare(true);
     startMusic();
 
@@ -442,8 +526,16 @@ export default function Runner3D({
     scene.add(trail);
 
     // dust particles
-    const MAX_PARTICLES = 400;
     const partGeo = new THREE.BufferGeometry();
+    // performance-scaled particle/weather counts
+const DPR = Math.min(window.devicePixelRatio || 1, 2); // cap at 2
+const QUALITY = quality; // from your state (1=low,2=med,3=high)
+
+// Particles
+const MAX_PARTICLES = Math.floor((QUALITY === 1 ? 180 : QUALITY === 2 ? 320 : 400) / DPR);
+
+// Weather
+const WEATHER_COUNT = Math.floor((QUALITY === 1 ? 220 : QUALITY === 2 ? 360 : 500) / DPR);
     const pPositions = new Float32Array(MAX_PARTICLES * 3);
     const pVelocities = new Float32Array(MAX_PARTICLES * 3);
     const pLife = new Float32Array(MAX_PARTICLES);
@@ -499,7 +591,6 @@ export default function Runner3D({
 
     // weather FX
     const WEATHER = colors.weather; // from world
-    const WEATHER_COUNT = 500;
     const wPos = new Float32Array(WEATHER_COUNT * 3);
     const wVel = new Float32Array(WEATHER_COUNT * 3);
     for (let i = 0; i < WEATHER_COUNT; i++) {
@@ -529,12 +620,14 @@ export default function Runner3D({
 
     // animation tick counter
     let t = 0;
+        // --- Hybrid boss-burst scheduler ---
     function diffFactor(): number {
       const seconds = t / 60;
       const adapt = Math.min(1, (seconds > 10 ? (localScore / (seconds * 12 + 1)) : 0) * 0.15);
       const val = Math.max(0, Math.min(1, seconds / 90 + adapt));
       return val;
     }
+    
 
     // physics state
     const lanes = [-1.2, 0, 1.2];
@@ -577,7 +670,8 @@ export default function Runner3D({
       const targetY = PLAYER_GROUND_Y - crouchOffset * 0.85;
       player.position.y += (targetY - player.position.y) * 0.35;
 
-      const slideDur = SLIDE_DURATION_MS * (1 + upg.slide * 0.06);
+const comboBoost = comboRef.current >= 2 ? 1.2 : 1.0; // longer crouch window on combo
+const slideDur = SLIDE_DURATION_MS * (1 + upg.slide * 0.06) * comboBoost;
       if (elapsed >= slideDur) {
         sliding = false;
         slideEndedAt = performance.now();
@@ -586,10 +680,42 @@ export default function Runner3D({
 
     // content: obstacles/orbs/powers/crystals
     const obstacles: Obs[] = [];
-    const obsGroundGeo = new THREE.BoxGeometry(0.9, 0.9, 0.9);
-    const obsGroundMat = new THREE.MeshStandardMaterial({ color: colors.obstacleGround, roughness: 0.6 });
-    const obsAirGeo = new THREE.BoxGeometry(0.9, 0.9, 0.9);
-    const obsAirMat = new THREE.MeshStandardMaterial({ color: colors.obstacleAir, roughness: 0.5 });
+const obsGroundGeo = new THREE.BoxGeometry(0.9, 0.9, 0.9);
+const obsGroundMat = new THREE.MeshStandardMaterial({ color: colors.obstacleGround, roughness: 0.6 });
+const obsAirGeo = new THREE.BoxGeometry(0.9, AIR_OBS_H, 0.9); // ↑ taller
+const obsAirMat = new THREE.MeshStandardMaterial({ color: colors.obstacleAir, roughness: 0.5 });
+
+// mix of shapes
+const groundShapes = [
+  obsGroundGeo,
+  new THREE.ConeGeometry(0.55, 1.0, 6),
+  new THREE.CylinderGeometry(0.45, 0.45, 0.9, 10),
+];
+const airShapes = [
+  obsAirGeo,
+  new THREE.CylinderGeometry(0.45, 0.45, AIR_OBS_H, 10),
+  new THREE.OctahedronGeometry(0.62, 0),
+];
+
+// --- Air obstacle visual aids (outline + ground marker + pole) ---
+const airOutlineMat = new THREE.LineBasicMaterial({
+  color: 0xfff07a,
+  transparent: true,
+  opacity: 0.9
+});
+const airMarkerGeo = new THREE.CircleGeometry(0.62, 48);
+const airMarkerMat = new THREE.MeshBasicMaterial({
+  color: 0xffd166,
+  transparent: true,
+  opacity: 0.28,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending
+});
+const airPoleMat = new THREE.MeshBasicMaterial({
+  color: 0xffe9a3,
+  transparent: true,
+  opacity: 0.55,
+});
 
     type PatternPiece = { type: 'ground' | 'air'; dz: number; lane?: number; };
     const patterns: PatternPiece[][] = [
@@ -616,24 +742,48 @@ export default function Runner3D({
       ],
     ];
 
-    function spawnObstacleWithType(zPos: number, laneIdx: number, type: 'ground' | 'air') {
-      const laneX = [-1.2, 0, 1.2][laneIdx];
-      const geo = type === 'air' ? obsAirGeo : obsGroundGeo;
-      const mat = type === 'air' ? obsAirMat : obsGroundMat;
-      const m = new THREE.Mesh(geo, mat);
-      m.castShadow = true;
-      m.position.set(laneX, type === 'air' ? 1.05 : 0.55, zPos);
+function spawnObstacleWithType(zPos: number, forcingLaneIdx: number, type: ObstacleType) {
+  const laneX = [-1.2, 0, 1.2][forcingLaneIdx];
+  const isAir = type === 'air';
+  const geo = isAir ? obsAirGeo : obsGroundGeo;
+  const mat = isAir ? obsAirMat : obsGroundMat;
 
-      // moving/rotating hazards
-      (m.userData as any).move = rand() < 0.25;
-      (m.userData as any).rot  = rand() < 0.20;
-      (m.userData as any).amp  = 0.35 + rand()*0.35;
-      (m.userData as any).spd  = 0.6 + rand()*0.8;
+  const m = new THREE.Mesh(geo, mat);
+  m.castShadow = true;
+  m.position.set(laneX, isAir ? AIR_OBS_Y : 0.55, zPos);
+  scene.add(m);
 
-      scene.add(m);
-      const aabb = new THREE.Box3().setFromObject(m);
-      obstacles.push({ mesh: m, aabb, active: true, type });
-    }
+  // Attach special visuals for AIR obstacles
+  if (isAir) {
+    // 1) glowing outline
+    const edges = new THREE.EdgesGeometry(geo);
+    const outline = new THREE.LineSegments(edges, airOutlineMat);
+    outline.userData = { pulse: (Math.random() * Math.PI * 2) };
+    m.add(outline);
+
+    // 2) ground marker disk (independent mesh at Y≈ground)
+    const marker = new THREE.Mesh(airMarkerGeo, airMarkerMat);
+    marker.rotation.x = -Math.PI / 2;
+    marker.position.set(laneX, 0.02, zPos);
+    scene.add(marker);
+
+    // 3) slim pole from ground → bottom of obstacle
+    const poleHeight = Math.max(0.2, m.position.y - 0.05);
+    const poleGeo = new THREE.CylinderGeometry(0.02, 0.02, poleHeight, 8);
+    const pole = new THREE.Mesh(poleGeo, airPoleMat);
+    pole.position.set(laneX, poleHeight / 2, zPos);
+    scene.add(pole);
+
+    // keep references for updates/removal
+    (m.userData as any).outline = outline;
+    (m.userData as any).marker = marker;
+    (m.userData as any).pole = pole;
+  }
+
+  const aabb = new THREE.Box3().setFromObject(m);
+  obstacles.push({ mesh: m, aabb, active: true, type });
+}
+
 
     function applyPattern(zStart: number) {
       const pick = patterns[Math.floor(rand() * patterns.length)];
@@ -646,24 +796,53 @@ export default function Runner3D({
 
     let lastPatternEndZ = -40;
 
-    function spawnObstacle(zPos: number) {
-      const laneX = lanes[Math.floor(rand() * lanes.length)];
-      const isAir = rand() < (0.45 + 0.3 * diffFactor());
-      const geo = isAir ? obsAirGeo : obsGroundGeo;
-      const mat = isAir ? obsAirMat : obsGroundMat;
-      const m = new THREE.Mesh(geo, mat); m.castShadow = true;
-      m.position.set(laneX, isAir ? 1.08 : 0.55, zPos);
+function spawnObstacle(zPos: number) {
+  const laneX = lanes[Math.floor(rand() * lanes.length)];
+  const isAir = rand() < (0.45 + 0.3 * diffFactor());
+const geo = (isAir ? airShapes : groundShapes)[Math.floor(rand() *  airShapes.length)];
+  const mat = isAir ? obsAirMat : obsGroundMat;
 
-      // moving/rotating hazards
-      (m.userData as any).move = rand() < 0.25;
-      (m.userData as any).rot  = rand() < 0.20;
-      (m.userData as any).amp  = 0.35 + rand()*0.35;
-      (m.userData as any).spd  = 0.6 + rand()*0.8;
+  const m = new THREE.Mesh(geo, mat);
+  m.castShadow = true;
+  m.position.set(laneX, isAir ? AIR_OBS_Y : 0.55, zPos);
+  scene.add(m);
 
-      scene.add(m);
-      const aabb = new THREE.Box3().setFromObject(m);
-      obstacles.push({ mesh: m, aabb, active: true, type: isAir ? 'air' : 'ground' });
-    }
+  // --- add the same helper visuals for AIR obstacles ---
+  if (isAir) {
+    // 1) glowing outline
+    const edges = new THREE.EdgesGeometry(geo);
+    const outline = new THREE.LineSegments(edges, airOutlineMat);
+    outline.userData = { pulse: (Math.random() * Math.PI * 2) };
+    m.add(outline);
+
+    // 2) ground marker disk
+    const marker = new THREE.Mesh(airMarkerGeo, airMarkerMat);
+    marker.rotation.x = -Math.PI / 2;
+    marker.position.set(laneX, 0.02, zPos);
+    scene.add(marker);
+
+    // 3) slim pole from ground to obstacle
+    const poleHeight = Math.max(0.2, m.position.y - 0.05);
+    const poleGeo = new THREE.CylinderGeometry(0.02, 0.02, poleHeight, 8);
+    const pole = new THREE.Mesh(poleGeo, airPoleMat);
+    pole.position.set(laneX, poleHeight / 2, zPos);
+    scene.add(pole);
+
+    // store refs so our existing update/cleanup code works
+    (m.userData as any).outline = outline;
+    (m.userData as any).marker = marker;
+    (m.userData as any).pole   = pole;
+  }
+
+  // optional movement/rotation
+  (m.userData as any).move = rand() < 0.25;
+  (m.userData as any).rot  = rand() < 0.20;
+  (m.userData as any).amp  = 0.35 + rand()*0.35;
+  (m.userData as any).spd  = 0.6 + rand()*0.8;
+
+  const aabb = new THREE.Box3().setFromObject(m);
+  obstacles.push({ mesh: m, aabb, active: true, type: isAir ? 'air' : 'ground' });
+}
 
     const orbs: Orb[] = [];
     const orbGeo = new THREE.SphereGeometry(0.22, 16, 16);
@@ -677,24 +856,90 @@ export default function Runner3D({
       orbs.push({ mesh: m, aabb: sphere, active: true, z: zPos });
     }
 
-    const powers: Power[] = [];
-    const ico = new THREE.IcosahedronGeometry(0.26, 0);
-    const matMagnet = new THREE.MeshStandardMaterial({ color: colors.magnet, emissive: 0xffb400, emissiveIntensity: 0.7, roughness: 0.3 });
-    const matBoost = new THREE.MeshStandardMaterial({ color: colors.boost, emissive: 0x00bfa5, emissiveIntensity: 0.8, roughness: 0.3 });
-    const matShield = new THREE.MeshStandardMaterial({ color: colors.shield, emissive: 0x67d4ff, emissiveIntensity: 0.8, roughness: 0.3 });
-    const matDouble = new THREE.MeshStandardMaterial({ color: 0xff66d9, emissive: 0xff66d9, emissiveIntensity: 0.8, roughness: 0.3 });
+    function spawnSkyRow(zPos: number) {
+  const ySky = 2.5;
+  for (const x of [-1.2, 0, 1.2]) {
+    const m = new THREE.Mesh(orbGeo, orbMat);
+    m.position.set(x, ySky, zPos);
+    scene.add(m);
+    const sphere = new THREE.Sphere(m.position, 0.22);
+    orbs.push({ mesh: m, aabb: sphere, active: true, z: zPos });
+  }
+}
 
-    function spawnPower(zPos: number) {
-      const laneX = lanes[Math.floor(rand() * lanes.length)];
-      const r = rand();
-      const kind: PowerKind = r < 0.32 ? 'magnet' : r < 0.62 ? 'boost' : r < 0.86 ? 'shield' : 'double';
-      const mat = kind === 'magnet' ? matMagnet : kind === 'boost' ? matBoost : kind === 'shield' ? matShield : matDouble;
-      const m = new THREE.Mesh(ico, mat);
-      m.position.set(laneX, 0.9, zPos);
-      scene.add(m);
-      const sphere = new THREE.Sphere(m.position, 0.28);
-      powers.push({ mesh: m, aabb: sphere, active: true, kind });
-    }
+// Start a 3s flight and pre-spawn a few sky rows immediately
+function startFlight(now: number) {
+  flyUntilRef.current = now + 3000;   // 3 seconds
+  flyRowsLeftRef.current = 12;        // hard cap of rows per flight
+  flySpawnCooldownRef.current = 0;
+
+  // spawn 3 rows right away so coins are visible instantly
+  const lastZ = orbs.reduce((min, o) => (o.active ? Math.min(min, o.mesh.position.z) : min), -10);
+  let z = Math.min(lastZ, -10) - 6;
+  for (let i = 0; i < 3 && flyRowsLeftRef.current > 0; i++) {
+    spawnSkyRow(z);
+    z -= 6;
+    flyRowsLeftRef.current--;
+  }
+}
+
+    const powers: Power[] = [];
+// ---- Power geo + materials (must be before spawnPower) ----
+const ico = new THREE.IcosahedronGeometry(0.26, 0);
+
+const matMagnet = new THREE.MeshStandardMaterial({
+  color: colors.magnet, emissive: 0xffb400, emissiveIntensity: 0.7, roughness: 0.3
+});
+const matBoost = new THREE.MeshStandardMaterial({
+  color: colors.boost, emissive: 0x00bfa5, emissiveIntensity: 0.8, roughness: 0.3
+});
+const matShield = new THREE.MeshStandardMaterial({
+  color: colors.shield, emissive: 0x67d4ff, emissiveIntensity: 0.8, roughness: 0.3
+});
+const matDouble = new THREE.MeshStandardMaterial({
+  color: 0xff66d9, emissive: 0xff66d9, emissiveIntensity: 0.8, roughness: 0.3
+});
+const matRisk = new THREE.MeshStandardMaterial({
+  color: 0x9b59ff, emissive: 0x9b59ff, emissiveIntensity: 0.9, roughness: 0.25
+});
+const matWings = new THREE.MeshStandardMaterial({
+  color: 0xfff7a9, emissive: 0xfff7a9, emissiveIntensity: 0.9, roughness: 0.25
+});
+const matHeart = new THREE.MeshStandardMaterial({
+  color: 0xff4d6d, emissive: 0xff4d6d, emissiveIntensity: 0.9, roughness: 0.25
+});
+
+// ---- Spawner (uses the materials above) ----
+function spawnPower(zPos: number) {
+  const laneX = lanes[Math.floor(rand() * lanes.length)];
+  const r = rand();
+
+  // 8% risk, 6% wings, 3% heart, rest distributed across the classics
+  const kind: PowerKind =
+    r < 0.26 ? 'magnet' :
+    r < 0.52 ? 'boost'  :
+    r < 0.74 ? 'shield' :
+    r < 0.89 ? 'double' :
+    r < 0.85 ? 'wings'  :
+    r < 0.98 ? 'heart'  : 'risk';
+
+  const mat =
+    kind === 'magnet' ? matMagnet :
+    kind === 'boost'  ? matBoost  :
+    kind === 'shield' ? matShield :
+    kind === 'double' ? matDouble :
+    kind === 'wings'  ? matWings  :
+    kind === 'heart'  ? matHeart  : matRisk;
+
+  const m = new THREE.Mesh(ico, mat);
+  m.position.set(laneX, 0.9, zPos);
+  scene.add(m);
+
+  const sphere = new THREE.Sphere(m.position, 0.28);
+  powers.push({ mesh: m, aabb: sphere, active: true, kind });
+}
+
+
 
     // crystals (upgrade currency)
     const crystals: Crystal[] = [];
@@ -709,15 +954,9 @@ export default function Runner3D({
       scene.add(m);
     }
 
-    // preload obstacles or boss wave depending on mode
-    if (mode === 'boss') {
-      for (let i = 0; i < 50; i++) {
-        const pattern = i % 2 === 0 ? 'air' : 'ground';
-        spawnObstacleWithType(-i * 8, i % 3, pattern as ObstacleType);
-      }
-    } else {
-      for (let i = 1; i <= 10; i++) spawnObstacle(-i * 12);
-    }
+// preload some random obstacles at start
+for (let i = 1; i <= 10; i++) spawnObstacle(-i * 12);
+
     // preload crystals
     for (let i = 1; i <= 6; i++) spawnCrystal(-i * 22 - 10);
 
@@ -732,7 +971,7 @@ export default function Runner3D({
 
     // input
     const onKey = (e: KeyboardEvent) => {
-      if (dead || paused) return;
+if (deadRef.current || pausedRef.current) return;
       const now = performance.now();
 
       if (e.key === ' ' || e.key === 'ArrowUp' || e.key === 'w') {
@@ -795,14 +1034,15 @@ export default function Runner3D({
     };
     window.addEventListener('keydown', onKey);
 
-    const onPointer = (e: PointerEvent) => {
-      if (dead || paused) return;
-      const rect = renderer.domElement.getBoundingClientRect();
-      const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-      if (x < -0.33) { laneIndex = 0; }
-      else if (x > 0.33) { laneIndex = 2; }
-      else { laneIndex = 1; }
-    };
+const onPointer = (e: PointerEvent) => {
+  if (deadRef.current || pausedRef.current) return;
+  const rect = renderer.domElement.getBoundingClientRect();
+  const x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+  if (x < -0.33) laneIndex = 0;
+  else if (x > 0.33) laneIndex = 2;
+  else laneIndex = 1;
+};
+
     window.addEventListener('pointerdown', onPointer);
 
     // touch slide
@@ -825,382 +1065,619 @@ export default function Runner3D({
     const playerAABB = new THREE.Box3();
     const tmpVec = new THREE.Vector3();
 
+  let nextBossAtScore = 250; // first burst at 250 pts, then +350…
+
+  const spawnBossBurst = (zStart: number) => {
+    // a quick alternating lane wave
+    let z = zStart;
+    for (let i = 0; i < 28; i++) {
+      const type: ObstacleType = i % 2 === 0 ? 'air' : 'ground';
+      const lane = i % 3;
+      spawnObstacleWithType(z, lane, type);
+      z -= 6;
+    }
+  };
+
     const animate = () => {
-      if (fpsSmoothed < 45 && quality > 1) setQuality(q => Math.max(1, q - 1));
-      if (paused) {
-        rafRef.current = requestAnimationFrame(animate);
-        return renderer.render(scene, camera);
+  try {
+    // --- timing & fps smoothing ---
+    if (fpsSmoothed < 45 && quality > 1) setQuality(q => Math.max(1, q - 1));
+
+if (pausedRef.current) {
+  rafRef.current = requestAnimationFrame(animate);
+  renderer.render(scene, camera);
+  return;
+}
+
+
+    const now = performance.now();
+    const dt = Math.max(1, now - lastFrameTime);
+    const instantFPS = 1000 / dt;
+    fpsSmoothed = fpsSmoothed * 0.9 + instantFPS * 0.1;
+    lastFrameTime = now;
+const inSky = now < flyUntilRef.current;
+
+    if (fpsSmoothed < TARGET_FPS - 8) {
+      renderer.shadowMap.enabled = false;
+      (weatherMat as THREE.PointsMaterial).opacity *= 0.98;
+      (partMat as THREE.PointsMaterial).opacity *= 0.99;
+      (slMat as THREE.LineBasicMaterial).opacity *= 0.98;
+    }
+
+    t += 1;
+
+    // --- speeds & intensity ---
+    const speedMult = now < boostUntilRef.current ? BOOST_MULT : 1;
+    const extra = 0.00004 * diffFactor();
+    const slowmo = now < timeWarpUntilRef.current ? 0.45 : 1;
+const riskSpeedMult = now < riskUntilRef.current ? 1.25 : 1.0;
+const scrollSpeedBase = (baseSpeed + (t * (accel + extra))) * speedMult * riskSpeedMult;
+    const scrollSpeed = scrollSpeedBase * slowmo * (assist ? 0.92 : 1);
+    lastSpeedRef.current = scrollSpeed;
+// --- background sky transition based on speed & combo ---
+if (mountRef.current) {
+  // base hues per world
+  const baseHue =
+    world === 'neonCity'   ? 210 :
+    world === 'inkVoid'    ? 260 :
+    world === 'frostCavern'? 210 :
+    /* desertDusk */         28;
+
+  // intensity pulls hue toward “hot” as you go faster / combo up
+  const comboHot = Math.min(1, comboRef.current / 5);
+  const speedHot = Math.min(1, scrollSpeed / 1.4);
+  const hotT = Math.max(comboHot * 0.6, speedHot * 0.8);
+
+  const topHue = lerp(baseHue, 320, hotT); // blend toward magenta at high intensity
+  const botHue = lerp(baseHue - 20, 12,  hotT); // warm lower horizon
+  const top = hsl(topHue, 65, 12 + hotT * 6);
+  const bot = hsl(botHue, 80,  4  + hotT * 8);
+
+  (mountRef.current as HTMLDivElement).style.background =
+    `linear-gradient(180deg, ${top} 0%, ${bot} 100%)`;
+}
+
+    // ⭐ combo perks
+if (comboRef.current >= 3) {
+  // soft “auto-magnet” while you hold x3+
+  magnetUntilRef.current = Math.max(magnetUntilRef.current, now + 180);
+}
+if (comboRef.current >= 4) {
+  // tiny time warp pulses when near obstacles
+  timeWarpUntilRef.current = Math.max(timeWarpUntilRef.current, now + 120);
+}
+
+    // dynamic camera tilt to see more ahead
+    camera.position.y = 2.8 + Math.min(0.8, scrollSpeed * 1.2);
+    camera.rotation.x = -0.22 - Math.min(0.15, scrollSpeed * 0.3);
+
+// FOV zoom while boosting
+const targetFov = FIXED_FOV + (now < boostUntilRef.current ? BOOST_FOV_DELTA : 0);
+camera.fov += (targetFov - camera.fov) * 0.08;
+camera.updateProjectionMatrix();
+
+// micro camera shake on pickup/hit (decays automatically)
+if (lastPickupAtRef.current > now - 140) {
+  camera.position.x += (Math.random() - 0.5) * SHAKE_MAG;
+  camera.position.y += (Math.random() - 0.5) * SHAKE_MAG * 0.5;
+}
+
+    updateMusic(speedMult, comboRef.current);
+    if (t % Math.max(300, 600 - Math.floor(300 * diffFactor())) === 0) baseSpeed += 0.05;
+    if (t % 6 === 0) setSpeedView(Number(scrollSpeed.toFixed(2)));
+
+    // occasional lightning flash (not in inkVoid)
+    if (Math.random() < 0.002 && colors.weather !== 'snow' && world !== 'inkVoid') {
+      const flash = 0.25 + Math.random()*0.35;
+      (renderer.domElement.style as any).filter = `brightness(${1+flash})`;
+      setTimeout(() => { (renderer.domElement.style as any).filter = ''; }, 120);
+    }
+
+    // --- particles (dust) ---
+    for (let i = 0; i < MAX_PARTICLES; i++) {
+      if (pLife[i] > 0) {
+        pLife[i] -= dt;
+        pVelocities[i*3+1] -= 0.0004;
+        pPositions[i*3+0] += pVelocities[i*3+0];
+        pPositions[i*3+1] += pVelocities[i*3+1];
+        pPositions[i*3+2] += pVelocities[i*3+2] + scrollSpeed * 0.3;
       }
+    }
+    partGeo.attributes.position.needsUpdate = true;
 
-      const now = performance.now();
-      const dt = Math.max(1, now - lastFrameTime);
-      const instantFPS = 1000 / dt;
-      fpsSmoothed = fpsSmoothed * 0.9 + instantFPS * 0.1;
-      lastFrameTime = now;
-
-      // dynamic quality fade when needed
-      if (fpsSmoothed < TARGET_FPS - 8) {
-        renderer.shadowMap.enabled = false;
-        (weatherMat as THREE.PointsMaterial).opacity *= 0.98;
-        (partMat as THREE.PointsMaterial).opacity *= 0.99;
-        (slMat as THREE.LineBasicMaterial).opacity *= 0.98;
-      }
-
-      t += 1;
-
-      // speed
-      const speedMult = now < boostUntilRef.current ? BOOST_MULT : 1;
-      const extra = 0.00004 * diffFactor();
-
-      // near-miss slow-mo
-      const slowmo = performance.now() < timeWarpUntilRef.current ? 0.45 : 1;
-
-      const scrollSpeedBase = (baseSpeed + (t * (accel + extra))) * speedMult;
-      const scrollSpeed = scrollSpeedBase * slowmo * (assist ? 0.92 : 1);
-      lastSpeedRef.current = scrollSpeed;
-
-      // music layers follow intensity
-      updateMusic(speedMult, comboRef.current);
-
-      if (t % Math.max(300, 600 - Math.floor(300 * diffFactor())) === 0) baseSpeed += 0.05;
-
-      // HUD throttle
-      if (t % 6 === 0) setSpeedView(Number(scrollSpeed.toFixed(2)));
-
-      // occasional lightning flash (not in inkVoid)
-      if (rand() < 0.002 && world !== 'inkVoid') {
-        const flash = 0.25 + rand()*0.35;
-        (renderer.domElement.style as any).filter = `brightness(${1+flash})`;
-        setTimeout(() => { (renderer.domElement.style as any).filter = ''; }, 120);
-      }
-
-      // particles update
-      for (let i = 0; i < MAX_PARTICLES; i++) {
-        if (pLife[i] > 0) {
-          pLife[i] -= dt;
-          pVelocities[i*3+1] -= 0.0004;
-          pPositions[i*3+0] += pVelocities[i*3+0];
-          pPositions[i*3+1] += pVelocities[i*3+1];
-          pPositions[i*3+2] += pVelocities[i*3+2] + scrollSpeed * 0.3;
+    // --- speed lines during boost ---
+    (slMat as THREE.LineBasicMaterial).opacity = speedMult > 1 ? 0.38 : 0.0;
+    if (speedMult > 1) {
+      const attr = slGeo.getAttribute('position') as THREE.BufferAttribute;
+      for (let i = 0; i < SPEEDLINE_COUNT; i++) {
+        const idx = i * 6;
+        slPos[idx+2] += scrollSpeed * 1.8;
+        slPos[idx+5] += scrollSpeed * 1.8;
+        if (slPos[idx+2] > 4) {
+          const x = -1.6 + Math.random()*3.2;
+          const y = 0.4 + Math.random()*1.6;
+          const z = -2 - Math.random()*18;
+          slPos[idx+0]=x; slPos[idx+1]=y; slPos[idx+2]=z;
+          slPos[idx+3]=x; slPos[idx+4]=y; slPos[idx+5]=z-0.7;
         }
       }
-      partGeo.attributes.position.needsUpdate = true;
+      attr.needsUpdate = true;
+    }
 
-      // speed lines
-      (speedLines.material as THREE.LineBasicMaterial).opacity = speedMult > 1 ? 0.38 : 0.0;
-      if (speedMult > 1) {
-        const attr = slGeo.getAttribute('position') as THREE.BufferAttribute;
-        for (let i = 0; i < SPEEDLINE_COUNT; i++) {
-          const idx = i * 6;
-          slPos[idx+2] += scrollSpeed * 1.8;
-          slPos[idx+5] += scrollSpeed * 1.8;
-          if (slPos[idx+2] > 4) {
-            const x = -1.6 + rand()*3.2;
-            const y = 0.4 + rand()*1.6;
-            const z = -2 - rand()*18;
-            slPos[idx+0]=x; slPos[idx+1]=y; slPos[idx+2]=z;
-            slPos[idx+3]=x; slPos[idx+4]=y; slPos[idx+5]=z-0.7;
-          }
+    // --- weather drift ---
+    const wAttr = weatherGeo.getAttribute('position') as THREE.BufferAttribute;
+    for (let i = 0; i < WEATHER_COUNT; i++) {
+      wPos[i*3+1] += wVel[i*3+1];
+      wPos[i*3+2] += wVel[i*3+2] + scrollSpeed * 0.4;
+      if (wPos[i*3+1] < 0.2 || wPos[i*3+2] > 6) {
+        wPos[i*3+0] = -2.2 + Math.random()*4.4;
+        wPos[i*3+1] = 2 + Math.random()*3.5;
+        wPos[i*3+2] = -20 - Math.random()*40;
+      }
+    }
+    wAttr.needsUpdate = true;
+// fade weather stronger over time
+const weatherTarget = 0.4 + 0.4 * diffFactor();
+(weatherMat as THREE.PointsMaterial).opacity += (weatherTarget - (weatherMat as any).opacity) * 0.02;
+
+    // --- lane tweening ---
+    const lanesArr = [-1.2, 0, 1.2];
+    const targetX = lanesArr[laneIndex];
+    const dx = targetX - player.position.x;
+    const dtSec = Math.max(0.001, dt / 1000);
+    const maxSpeed = 6.0;
+    const maxStep = maxSpeed * dtSec;
+    const step = Math.sign(dx) * Math.min(Math.abs(dx), maxStep);
+    player.position.x += step;
+    camera.rotation.z = THREE.MathUtils.lerp(camera.rotation.z, -step * 0.9, 0.25);
+    if (Math.abs(targetX - player.position.x) < maxStep) player.position.x = targetX;
+
+ // --- jump / gravity / slide ---
+const grounded = y <= PLAYER_GROUND_Y + 0.0001;
+
+if (inSky) {
+  // lock to sky lane
+  sliding = false;
+  vy = 0;
+  const targetY = 2.5;
+  y += (targetY - y) * 0.18;
+} else {
+  if (grounded && !wasGrounded) {
+    jumpsSinceAir = 0;
+    lastGroundedAt = now;
+    if (now <= jumpBufferUntil) {
+      const speedScale = 1 + Math.min(0.3, scrollSpeed * 0.02);
+      const jumpUp = 1 + upg.jump * 0.05;
+      vy = JUMP_STRENGTH_BASE * speedScale * jumpUp;
+      (sfxRef.current?.jump)?.play?.();
+      jumpBufferUntil = 0;
+    }
+  }
+
+  if (grounded && jumpBufferUntil) {
+    const speedScale = 1 + Math.min(0.3, scrollSpeed * 0.02);
+    const jumpUp = 1 + upg.jump * 0.05;
+    vy = JUMP_STRENGTH_BASE * speedScale * jumpUp;
+    (sfxRef.current?.jump)?.play?.();
+    jumpBufferUntil = 0;
+  }
+
+  if (!sliding) { vy -= GRAVITY; y += vy; if (y < PLAYER_GROUND_Y) { y = PLAYER_GROUND_Y; vy = 0; } }
+  else { y = PLAYER_GROUND_Y; vy = 0; }
+  updateSlide();
+}
+
+player.position.y = y;
+if (!inSky && grounded) lastGroundedAt = now;
+wasGrounded = grounded || inSky;
+
+
+    // --- glow trail ---
+    for (let i = trailCount - 1; i > 0; i--) trailPositions[i].copy(trailPositions[i - 1]);
+    trailPositions[0].set(player.position.x, player.position.y, player.position.z);
+    for (let i = 0; i < trailCount; i++) {
+      const p = trailPositions[i];
+      const alpha = (1 - i / trailCount) * 0.35 * (speedMult > 1 ? 1.2 : 0.9);
+      (trail.material as THREE.MeshBasicMaterial).opacity = alpha;
+      trailMatrix.makeTranslation(p.x, p.y, p.z - i * 0.02);
+      trail.setMatrixAt(i, trailMatrix);
+    }
+    trail.instanceMatrix.needsUpdate = true;
+
+    // --- ground scroll ---
+    ground.position.z += scrollSpeed;
+    (groundMat.map as THREE.CanvasTexture).offset.y += scrollSpeed * 0.06;
+    if (ground.position.z > -120) ground.position.z = -160;
+
+    // --- obstacles ---
+    for (const o of obstacles) {
+      if (!o.active) continue;
+
+      // move forward
+      o.mesh.position.z += scrollSpeed;
+
+      const ud: any = o.mesh.userData || {};
+      if (ud.move) {
+        o.mesh.position.x += Math.sin((t * 0.03) + (beatRef.current * 0.6)) * 0.006 * (ud.spd || 1);
+        o.mesh.position.x = THREE.MathUtils.clamp(o.mesh.position.x, -1.8, 1.8);
+      }
+      if (ud.rot) o.mesh.rotation.y += 0.01 * (ud.spd || 1);
+
+      // pulse outline + keep marker/pole aligned for air blocks
+      if (o.type === 'air') {
+        const outline = ud.outline as THREE.LineSegments | undefined;
+        if (outline) {
+          const pulse = (outline.userData?.pulse || 0) + 0.08;
+          outline.userData.pulse = pulse;
+          (outline.material as THREE.LineBasicMaterial).opacity = 0.55 + 0.35 * Math.sin(pulse);
         }
-        attr.needsUpdate = true;
+        const marker = ud.marker as THREE.Mesh | undefined;
+        if (marker) { marker.position.z = o.mesh.position.z; marker.position.x = o.mesh.position.x; }
+        const pole = ud.pole as THREE.Mesh | undefined;
+        if (pole)   { pole.position.z   = o.mesh.position.z; pole.position.x   = o.mesh.position.x; }
       }
 
-      // weather update
-      const wAttr = weatherGeo.getAttribute('position') as THREE.BufferAttribute;
-      for (let i = 0; i < WEATHER_COUNT; i++) {
-        wPos[i*3+1] += wVel[i*3+1];
-        wPos[i*3+2] += wVel[i*3+2] + scrollSpeed * 0.4;
-        if (wPos[i*3+1] < 0.2 || wPos[i*3+2] > 6) {
-          wPos[i*3+0] = -2.2 + rand()*4.4;
-          wPos[i*3+1] = 2 + rand()*3.5;
-          wPos[i*3+2] = -20 - rand()*40;
+      o.aabb.setFromObject(o.mesh);
+      if (o.mesh.position.z > 6) {
+        o.active = false;
+        if (o.type === 'air') {
+          const ud2: any = o.mesh.userData || {};
+          if (ud2.marker) scene.remove(ud2.marker);
+          if (ud2.pole)   scene.remove(ud2.pole);
         }
+        scene.remove(o.mesh);
       }
-      wAttr.needsUpdate = true;
+    }
 
-      // lane movement dt-aware
-      const lanesArr = [-1.2, 0, 1.2];
-      const targetX = lanesArr[laneIndex];
-      const dx = targetX - player.position.x;
-      const dtSec = Math.max(0.001, dt / 1000);
-      const maxSpeed = 6.0;
-      const maxStep = maxSpeed * dtSec;
-      const step = Math.sign(dx) * Math.min(Math.abs(dx), maxStep);
-      player.position.x += step;
-      camera.rotation.z = THREE.MathUtils.lerp(camera.rotation.z, -step * 0.9, 0.25);
-      if (Math.abs(targetX - player.position.x) < maxStep) player.position.x = targetX;
-
-      // jump/grav + buffer/double
-      const grounded = y <= PLAYER_GROUND_Y + 0.0001;
-
-      if (grounded && !wasGrounded) {
-        jumpsSinceAir = 0;
-        lastGroundedAt = now;
-        if (now <= jumpBufferUntil) {
-          const speedScale = 1 + Math.min(0.3, scrollSpeed * 0.02);
-          const jumpUp = 1 + upg.jump * 0.05;
-          vy = JUMP_STRENGTH_BASE * speedScale * jumpUp;
-          playJump();
-          jumpBufferUntil = 0;
-        }
-      }
-
-      // allow jump buffer while steadily grounded
-      if (grounded && jumpBufferUntil) {
-        const speedScale = 1 + Math.min(0.3, scrollSpeed * 0.02);
-        const jumpUp = 1 + upg.jump * 0.05;
-        vy = JUMP_STRENGTH_BASE * speedScale * jumpUp;
-        playJump();
-        jumpBufferUntil = 0;
-      }
-
-      if (!sliding) {
-        vy -= GRAVITY; y += vy; if (y < PLAYER_GROUND_Y) { y = PLAYER_GROUND_Y; vy = 0; }
-      } else { y = PLAYER_GROUND_Y; vy = 0; }
-      player.position.y = y;
-      if (grounded) lastGroundedAt = now;
-      wasGrounded = grounded;
-
-      // slide animation
-      updateSlide();
-
-      // glow trail
-      for (let i = trailCount - 1; i > 0; i--) trailPositions[i].copy(trailPositions[i - 1]);
-      trailPositions[0].set(player.position.x, player.position.y, player.position.z);
-      for (let i = 0; i < trailCount; i++) {
-        const p = trailPositions[i];
-        const alpha = (1 - i / trailCount) * 0.35 * (speedMult > 1 ? 1.2 : 0.9);
-        (trail.material as THREE.MeshBasicMaterial).opacity = alpha;
-        trailMatrix.makeTranslation(p.x, p.y, p.z - i * 0.02);
-        trail.setMatrixAt(i, trailMatrix);
-      }
-      trail.instanceMatrix.needsUpdate = true;
-
-      // world scroll
-      ground.position.z += scrollSpeed;
-      (groundMat.map as THREE.CanvasTexture).offset.y += scrollSpeed * 0.06;
-      if (ground.position.z > -120) ground.position.z = -160;
-
-      // obstacles move and animate
-      for (const o of obstacles) {
-        if (!o.active) continue;
-
-        const ud = o.mesh.userData as any;
-        if (ud.move) {
-          o.mesh.position.x += Math.sin((t*0.03) + (beatRef.current*0.6)) * 0.006 * ud.spd;
-          o.mesh.position.x = THREE.MathUtils.clamp(o.mesh.position.x, -1.8, 1.8);
-        }
-        if (ud.rot) {
-          o.mesh.rotation.y += 0.01 * ud.spd;
-        }
-
-        o.mesh.position.z += scrollSpeed;
-        o.aabb.setFromObject(o.mesh);
-        if (o.mesh.position.z > 6) { o.active = false; scene.remove(o.mesh); }
-      }
-      if (obstacles.filter(o => o.active).length < 10) {
-        const lastZ = obstacles.reduce((min, o) => (o.active ? Math.min(min, o.mesh.position.z) : min), 0);
-        const nextBase = Math.min(lastZ, -20);
-        if (rand() < 0.6 + 0.2 * diffFactor()) {
-          lastPatternEndZ = applyPattern(nextBase - 9 - rand() * (8 - 4 * diffFactor()));
-        } else {
-          spawnObstacle(nextBase - 10 - rand() * (9 - 4 * diffFactor()));
-        }
-      }
-
-      // orbs
-      for (const orb of orbs) {
-        if (!orb.active) continue;
-        orb.mesh.position.z += scrollSpeed; orb.mesh.rotation.y += 0.05;
-        if (now < magnetUntilRef.current) {
-          const d = orb.mesh.position.distanceTo(player.position);
-          const magnetRadius = MAGNET_RADIUS * (1 + upg.magnet * 0.06);
-          if (d < magnetRadius) {
-            tmpVec.copy(player.position).sub(orb.mesh.position).multiplyScalar(MAGNET_PULL);
-            orb.mesh.position.add(tmpVec);
-          }
-        }
-        orb.aabb.center.copy(orb.mesh.position);
-        if (orb.mesh.position.z > 6) { orb.active = false; scene.remove(orb.mesh); }
-      }
-      if (orbs.filter(o => o.active).length < 12) {
-        const lastZ = orbs.reduce((min, o) => (o.active ? Math.min(min, o.mesh.position.z) : min), 0);
-        spawnOrb(Math.min(lastZ, -10) - 9 - rand() * 6);
-      }
-
-      // powers
-      for (const pwr of powers) {
-        if (!pwr.active) continue;
-        pwr.mesh.position.z += scrollSpeed; pwr.mesh.rotation.y += 0.04;
-        pwr.aabb.center.copy(pwr.mesh.position);
-        if (pwr.mesh.position.z > 6) { pwr.active = false; scene.remove(pwr.mesh); }
-      }
-      if (powers.filter(p => p.active).length < 4 && rand() < 0.02) {
-        const lastZ = powers.reduce((min, o) => (o.active ? Math.min(min, o.mesh.position.z) : min), 0);
-        spawnPower(Math.min(lastZ, -25) - 20 - rand() * 20);
-      }
-
-      // crystals
-      for (const c of crystals) {
-        if (!c.active) continue;
-        c.mesh.position.z += scrollSpeed;
-        c.mesh.rotation.y += 0.02;
-        if (player.position.distanceTo(c.mesh.position) < 0.46) {
-          c.active = false;
-          scene.remove(c.mesh);
-          setUpg(u => ({ ...u, jump: Math.min(5, u.jump + 1) })); // +1 jump upgrade point
-          burst(c.mesh.position.clone(), 16, 0.06, 500);
-        }
-        if (c.mesh.position.z > 6) { c.active = false; scene.remove(c.mesh); }
-      }
-      if (crystals.filter(c => c.active).length < 6 && rand() < 0.03) {
-        spawnCrystal(Math.min(-24, -20 - rand()*20));
-      }
-
-      // collisions (expand AABB in Z)
-      const pHeight = PLAYER_RADIUS * 2 * player.scale.y;
-      const isSlidingNow = sliding;
-      const widthFactor  = isSlidingNow ? 0.78 : 0.88;
-      const heightFactor = isSlidingNow ? 0.62 : (assist ? 0.90 : 0.95);
-      const minHeight    = isSlidingNow ? 0.16 : 0.24;
-      const pSize = new THREE.Vector3(
-        PLAYER_RADIUS * 2 * widthFactor,
-        Math.max(pHeight * heightFactor, minHeight),
-        0.72
-      );
-      playerAABB.setFromCenterAndSize(player.position.clone(), pSize);
-
-      const expandedAABB = playerAABB.clone();
-      const zPad = scrollSpeed * 0.25;
-      expandedAABB.min.z -= zPad; expandedAABB.max.z += zPad;
-      const xPad = 0.03;
-      expandedAABB.min.x -= xPad; expandedAABB.max.x += xPad;
-
-      // near-miss time warp
-      for (const o of obstacles) {
-        if (!o.active) continue;
-        const dz = Math.abs(o.mesh.position.z - player.position.z);
-        const dx = Math.abs(o.mesh.position.x - player.position.x);
-        const dy = Math.abs(o.mesh.position.y - player.position.y);
-        if (dz < 0.20 && dx < 0.45 && dy < 0.55) {
-          if (now > timeWarpUntilRef.current) timeWarpUntilRef.current = now + 700;
-          break;
-        }
-      }
-
-      for (const o of obstacles) {
-        if (!o.active) continue;
-        if (expandedAABB.intersectsBox(o.aabb)) {
-          if (now < shieldUntilRef.current) {
-            o.active = false; scene.remove(o.mesh);
-            camera.position.x += (rand() - 0.5) * 0.1;
-            camera.position.y += (rand() - 0.5) * 0.1;
-            burst(o.mesh.position.clone(), 22, 0.05, 450);
-            playHit();
-            shieldUntilRef.current = now + 400;
-          } else {
-            burst(player.position.clone(), 28, 0.07, 650);
-            playHit();
-            localDead = true;
-            break;
-          }
-        }
-      }
-
-      // pickups + combo + chain boost
-      for (const orb of orbs) {
-        if (!orb.active) continue;
-        if (player.position.distanceTo(orb.mesh.position) < 0.45) {
-          burst(orb.mesh.position.clone(), 16, 0.06, 500);
-          playPickup();
-          orb.active = false; scene.remove(orb.mesh);
-
-          if (now - lastPickupAtRef.current <= COMBO_WINDOW_MS) comboRef.current += 1;
-          else comboRef.current = 1;
-          comboRef.current = Math.min(COMBO_MAX, comboRef.current);
-          lastPickupAtRef.current = now;
-          localScore += Math.round(10 * (1 + Math.min(COMBO_MAX, comboRef.current) * 0.2));
-
-          chainTimesRef.current.push(now);
-          chainTimesRef.current = chainTimesRef.current.filter(ts => now - ts <= CHAIN_WINDOW_MS);
-          if (chainTimesRef.current.length >= CHAIN_NEEDED) {
-            boostUntilRef.current = Math.max(boostUntilRef.current, now + CHAIN_BOOST_MS);
-            chainTimesRef.current.length = 0;
-            playBoost();
-          }
-        }
-      }
-
-      // power-up touches
-      for (const pwr of powers) {
-        if (!pwr.active) continue;
-        if (player.position.distanceTo(pwr.mesh.position) < 0.5) {
-          pwr.active = false; scene.remove(pwr.mesh);
-          if (pwr.kind === 'magnet') magnetUntilRef.current = now + MAGNET_MS;
-          if (pwr.kind === 'boost')  { boostUntilRef.current = now + BOOST_MS; playBoost(); }
-          if (pwr.kind === 'shield') shieldUntilRef.current = now + SHIELD_MS;
-          if (pwr.kind === 'double') doubleUntilRef.current = now + DOUBLE_MS;
-        }
-      }
-      shieldMesh.visible = now < shieldUntilRef.current;
-      shieldMesh.rotation.z += 0.08;
-
-      // HUD badge & combo decay (10fps)
-      if (t % 6 === 0) {
-        setBadgePct({
-          magnet: Math.max(0, Math.min(1, (magnetUntilRef.current - now) / MAGNET_MS)),
-          boost:  Math.max(0, Math.min(1, (boostUntilRef.current  - now) / BOOST_MS)),
-          shield: Math.max(0, Math.min(1, (shieldUntilRef.current - now) / SHIELD_MS)),
-          dbl:    Math.max(0, Math.min(1, (doubleUntilRef.current - now) / DOUBLE_MS)),
-        });
-        const timeSincePickup = now - lastPickupAtRef.current;
-        const pct = 1 - Math.min(1, timeSincePickup / COMBO_WINDOW_MS);
-        const mult = 1 + Math.min(COMBO_MAX, comboRef.current) * 0.2;
-        setComboInfo({ mult: Number(mult.toFixed(2)), pct: Math.max(0, pct) });
-      }
-
-      // distance score baseline
-      if (!localDead) localScore = Math.max(localScore, Math.floor(t * 0.05));
-      renderer.render(scene, camera);
-
-      if (!localDead) {
-        rafRef.current = requestAnimationFrame(animate);
+    // spawn more obstacles
+    if (obstacles.filter(o => o.active).length < 10) {
+      const lastZ = obstacles.reduce((min, o) => (o.active ? Math.min(min, o.mesh.position.z) : min), 0);
+      const nextBase = Math.min(lastZ, -20);
+      if (Math.random() < 0.6 + 0.2 * diffFactor()) {
+        lastPatternEndZ = applyPattern(nextBase - 9 - Math.random() * (8 - 4 * diffFactor()));
       } else {
-        stopMusic();
-        setDead(true); setRunning(false);
-        setBest(b => Math.max(b, localScore));
-        setScore(localScore);
+        spawnObstacle(nextBase - 10 - Math.random() * (9 - 4 * diffFactor()));
       }
-    };
+    }
+
+// --- orbs (move + magnet + pickup) ---
+for (const orb of orbs) {
+  if (!orb.active) continue;
+
+  // movement/rotation
+  orb.mesh.position.z += scrollSpeed;
+  orb.mesh.rotation.y += 0.05;
+
+  // soft magnet
+  if (now < magnetUntilRef.current) {
+    const dMag = orb.mesh.position.distanceTo(player.position);
+    const magnetRadius = MAGNET_RADIUS * (1 + upg.magnet * 0.06);
+    if (dMag < magnetRadius) {
+      tmpVec.copy(player.position).sub(orb.mesh.position).multiplyScalar(MAGNET_PULL);
+      orb.mesh.position.add(tmpVec);
+    }
+  }
+
+  // pickup collision
+  const d = player.position.distanceTo(orb.mesh.position);
+  if (d < 0.45) {
+    orb.active = false;
+    scene.remove(orb.mesh);
+
+    // fx + sfx
+    burst(orb.mesh.position.clone(), 12, 0.06, 420);
+    (sfxRef.current?.pickup)?.play?.();
+    lastPickupAtRef.current = now;
+
+    // combo
+    comboRef.current = Math.min(COMBO_MAX, comboRef.current + 1);
+
+    // scoring (risk + combo multipliers)
+    const riskMult = now < riskUntilRef.current ? 2 : 1;
+    const comboMult = 1 + Math.min(COMBO_MAX, comboRef.current) * 0.2;
+    const add = Math.round(10 * comboMult * riskMult);
+    localScore += add;
+
+    continue; // done with this orb
+  }
+
+  // maintain aabb & cleanup
+  orb.aabb.center.copy(orb.mesh.position);
+  if (orb.mesh.position.z > 6) { orb.active = false; scene.remove(orb.mesh); }
+}
+
+// keep about ~12 orbs in play
+if (orbs.filter(o => o.active).length < 12) {
+  const lastZ = orbs.reduce((min, o) => (o.active ? Math.min(min, o.mesh.position.z) : min), 0);
+  spawnOrb(Math.min(lastZ, -10) - 9 - Math.random() * 6);
+}
+
+// Extra gold rows in the sky while flying (rate-limited + capped)
+if (inSky) {
+  // end-of-flight cleanup stops further rows
+  if (now >= flyUntilRef.current) {
+    flyRowsLeftRef.current = 0;
+  } else if (flyRowsLeftRef.current > 0 && now >= flySpawnCooldownRef.current) {
+    const lastZ = orbs.reduce((min, o) => (o.active ? Math.min(min, o.mesh.position.z) : min), -10);
+    const zRow = Math.min(lastZ, -10) - 7;    // keep a bit ahead
+    spawnSkyRow(zRow);
+    flyRowsLeftRef.current--;
+    flySpawnCooldownRef.current = now + 140;  // ~7 rows per second max
+  }
+}
+
+
+    // --- powers ---
+    for (const pwr of powers) {
+      if (!pwr.active) continue;
+      pwr.mesh.position.z += scrollSpeed; pwr.mesh.rotation.y += 0.04;
+      pwr.aabb.center.copy(pwr.mesh.position);
+      if (pwr.mesh.position.z > 6) { pwr.active = false; scene.remove(pwr.mesh); }
+    }
+    if (powers.filter(p => p.active).length < 4 && Math.random() < 0.02) {
+      const lastZ = powers.reduce((min, o) => (o.active ? Math.min(min, o.mesh.position.z) : min), 0);
+      spawnPower(Math.min(lastZ, -25) - 20 - Math.random() * 20);
+    }
+
+    // --- crystals ---
+    for (const c of crystals) {
+      if (!c.active) continue;
+      c.mesh.position.z += scrollSpeed;
+      c.mesh.rotation.y += 0.02;
+      if (player.position.distanceTo(c.mesh.position) < 0.46) {
+        c.active = false; scene.remove(c.mesh);
+        setUpg(u => ({ ...u, jump: Math.min(5, u.jump + 1) }));
+        burst(c.mesh.position.clone(), 16, 0.06, 500);
+      }
+      if (c.mesh.position.z > 6) { c.active = false; scene.remove(c.mesh); }
+    }
+
+    // --- near-miss slow-mo ---
+    for (const o of obstacles) {
+      if (!o.active) continue;
+      const dz = Math.abs(o.mesh.position.z - player.position.z);
+      const dx = Math.abs(o.mesh.position.x - player.position.x);
+      const dy = Math.abs(o.mesh.position.y - player.position.y);
+      if (dz < 0.20 && dx < 0.45 && dy < 0.55) {
+        if (now > timeWarpUntilRef.current) timeWarpUntilRef.current = now + 700;
+        break;
+      }
+    }
+
+    // --- collisions ---
+    const pHeight = PLAYER_RADIUS * 2 * player.scale.y;
+    const isSlidingNow = sliding;
+    const widthFactor  = isSlidingNow ? 0.78 : 0.88;
+    const heightFactor = isSlidingNow ? 0.75 : 0.98;
+    const minHeight    = isSlidingNow ? 0.16 : 0.24;
+    const pSize = new THREE.Vector3(
+      PLAYER_RADIUS * 2 * widthFactor,
+      Math.max(pHeight * heightFactor, minHeight),
+      0.72
+    );
+    playerAABB.setFromCenterAndSize(player.position.clone(), pSize);
+
+    const expandedAABB = playerAABB.clone();
+    const zPad = scrollSpeed * 0.25;
+    expandedAABB.min.z -= zPad; expandedAABB.max.z += zPad;
+    const xPad = 0.03;
+    expandedAABB.min.x -= xPad; expandedAABB.max.x += xPad;
+
+    for (const o of obstacles) {
+      if (!o.active) continue;
+if (expandedAABB.intersectsBox(o.aabb)) {
+  // skip collisions while flying or invincible
+  if (inSky || now < invincibleUntilRef.current) continue;
+
+  if (now < shieldUntilRef.current) {
+    o.active = false; scene.remove(o.mesh);
+    camera.position.x += (Math.random() - 0.5) * 0.1;
+    camera.position.y += (Math.random() - 0.5) * 0.1;
+    burst(o.mesh.position.clone(), 22, 0.05, 450);
+    (sfxRef.current?.hit)?.play?.();
+    shieldUntilRef.current = now + 400;
+  } else {
+const nextLives = Math.max(0, livesRef.current - 1);
+setLives(nextLives);
+livesRef.current = nextLives;
+
+invincibleUntilRef.current = now + 1000; // 1s immunity
+burst(player.position.clone(), 28, 0.07, 650);
+(sfxRef.current?.hit)?.play?.();
+
+if (nextLives <= 0) { localDead = true; break; }
+
+// tiny slow-mo nudge & camera shake ...
+timeWarpUntilRef.current = Math.max(timeWarpUntilRef.current, now + 220);
+camera.position.x += (Math.random() - 0.5) * 0.2;
+camera.position.y += (Math.random() - 0.5) * 0.2;
+
+// only die if no lives left
+if (nextLives <= 0) {
+  localDead = true;
+  break;
+}
+
+  }
+}
+    }
+
+    // --- power touches ---
+    for (const pwr of powers) {
+      if (!pwr.active) continue;
+      if (player.position.distanceTo(pwr.mesh.position) < 0.5) {
+        pwr.active = false; scene.remove(pwr.mesh);
+if (pwr.kind === 'magnet') magnetUntilRef.current = now + MAGNET_MS;
+if (pwr.kind === 'boost')  { boostUntilRef.current = now + BOOST_MS; playBoost(); }
+if (pwr.kind === 'shield') shieldUntilRef.current = now + SHIELD_MS;
+if (pwr.kind === 'double') doubleUntilRef.current = now + DOUBLE_MS;
+if (pwr.kind === 'risk')   riskUntilRef.current   = now + RISK_MS;
+if (pwr.kind === 'wings')  { startFlight(now); }
+if (pwr.kind === 'heart')  { setLives(v => Math.min(3, v + 1)); }
+
+      }
+    }
+shieldMesh.visible = (now < shieldUntilRef.current) || (now < invincibleUntilRef.current);
+    shieldMesh.rotation.z += 0.08;
+
+    // --- HUD & score ---
+    if (t % 6 === 0) {
+      setBadgePct({
+        magnet: Math.max(0, Math.min(1, (magnetUntilRef.current - now) / MAGNET_MS)),
+        boost:  Math.max(0, Math.min(1, (boostUntilRef.current  - now) / BOOST_MS)),
+        shield: Math.max(0, Math.min(1, (shieldUntilRef.current - now) / SHIELD_MS)),
+        dbl:    Math.max(0, Math.min(1, (doubleUntilRef.current - now) / DOUBLE_MS)),
+      });
+      const timeSincePickup = now - lastPickupAtRef.current;
+      const pct = 1 - Math.min(1, timeSincePickup / COMBO_WINDOW_MS);
+      const mult = 1 + Math.min(COMBO_MAX, comboRef.current) * 0.2;
+      setComboInfo({ mult: Number(mult.toFixed(2)), pct: Math.max(0, pct) });
+    }
+
+// distance score baseline
+    if (!localDead) localScore = Math.max(localScore, Math.floor(t * 0.05));
+
+// Boss bursts at score milestones
+if (localScore >= nextBossAtScore) {
+  // start just ahead of the furthest obstacle
+  const farZ = obstacles.reduce((min, o) => (o.active ? Math.min(min, o.mesh.position.z) : min), -10);
+  spawnBossBurst(Math.min(farZ, -20) - 16);
+  nextBossAtScore += 350;
+}
+
+    // --- draw ---
+    renderer.render(scene, camera);
+
+    if (!localDead) {
+      rafRef.current = requestAnimationFrame(animate);
+    } else {
+stopMusic();
+setDead(true); setRunning(false);
+setBest(b => Math.max(b, localScore));
+setScore(localScore);
+saveScoreLocal(localScore);
+loadBoard();
+    }
+  } catch (err) {
+    console.error('Frame error:', err);
+    setPaused(true);
+    rafRef.current = requestAnimationFrame(animate);
+  }
+};
+
 
     rafRef.current = requestAnimationFrame(animate);
 
-    cleanupRef.current = () => {
-      stopMusic();
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-      window.removeEventListener('keydown', onKey);
-      window.removeEventListener('pointerdown', onPointer);
-      renderer.domElement.removeEventListener('touchstart', onTouchStart as any);
-      renderer.domElement.removeEventListener('touchmove', onTouchMove as any);
-      renderer.dispose();
-      mount.innerHTML = '';
+cleanupRef.current = () => {
+  startedRef.current = false; // allow next start
+
+  stopMusic();
+  if (rafRef.current) cancelAnimationFrame(rafRef.current);
+  window.removeEventListener('keydown', onKey);
+  window.removeEventListener('pointerdown', onPointer);
+  renderer.domElement.removeEventListener('touchstart', onTouchStart as any);
+  renderer.domElement.removeEventListener('touchmove', onTouchMove as any);
+  renderer.dispose();
+  mount.innerHTML = '';
+};
+
+  }, [size, quality, colors, world, dailySeed, assist, upg.jump, upg.magnet, upg.slide]);
+
+useEffect(() => {
+  if (!running) return;
+  startGame();
+  return () => { if (cleanupRef.current) cleanupRef.current(); };
+}, [running]); // ← removed startGame from deps
+
+
+const handleStart = async () => {
+  setShowTitle(false);
+  // make sure the WebAudio context is unlocked on the user click
+  try { await (Howler as any).ctx?.resume?.(); } catch {}
+  if (!audioReadyRef.current) {
+    Howler.mute(false);
+    Howler.volume(1.0);
+
+    // helper to build sfx with preload + html5 fallback + error logs
+    const makeSfx = (file: string, vol = 0.4) => {
+      let h!: Howl;
+      h = new Howl({
+        src: [`/sounds/${file}`],   // put files in /public/sounds/
+        volume: vol,
+        preload: true,
+        html5: true,                 // more forgiving on mobile
+        onloaderror: (_id, err) => console.warn('SFX load error:', file, err),
+        onplayerror: (_id, err) => {
+          console.warn('SFX play error (retry on unlock):', file, err);
+          h.once('unlock', () => h.play());
+        },
+      });
+      return h;
     };
-  }, [size, quality, colors, world, mode, dailySeed, assist, upg.jump, upg.magnet, upg.slide]);
 
-  useEffect(() => {
-    if (!running) return;
-    startGame();
-    return () => { if (cleanupRef.current) cleanupRef.current(); };
-  }, [running, startGame]);
+    sfxRef.current = {
+      jump:   makeSfx('jump.mp3',   0.45),
+      pickup: makeSfx('pickup.mp3', 0.35),
+      slide:  makeSfx('slide.mp3',  0.30),
+      hit:    makeSfx('hit.mp3',    0.45),
+      boost:  makeSfx('boost.mp3',  0.35),
+      music:  new Howl({
+        src: ['/sounds/theme.mp3'],
+        loop: true,
+        volume: 0.45,
+        preload: true,
+        html5: true,
+        onloaderror: (_id, err) => console.warn('Music load error:', err),
+      }),
+    };
 
-  const handleStart = () => {
-    setDead(false); setScore(0); setRunning(false); setPaused(false); setCountdown(null);
-    setTimeout(() => setCountdown(countdownSeconds), 0);
-  };
-  const handleRetry = () => {
-    setDead(false); setScore(0); setRunning(false); setPaused(false); setCountdown(null);
-    setTimeout(() => setCountdown(countdownSeconds), 0);
-  };
+    setLives(3);
+    livesRef.current = 3;
+invincibleUntilRef.current = 0;
+flyUntilRef.current = 0;
+
+    // quick sanity check so you hear *something* immediately
+    sfxRef.current.jump?.play();
+
+    sfxRef.current.music?.play();
+    audioReadyRef.current = true;
+  }
+
+  setWorld(prev => pickRandomWorld(prev)); // new world each run
+
+  // reset & start countdown
+  setDead(false); setScore(0);
+  setRunning(false); setPaused(false);
+  setCountdown(null);
+  setTimeout(() => setCountdown(countdownSeconds), 0);
+};
+
+const handleRetry = () => {
+  // pick a new world for the next run
+  setWorld(prev => pickRandomWorld(prev));
+
+  setDead(false);
+  setScore(0);
+  setRunning(false);
+  setPaused(false);
+  setCountdown(null);
+
+  // fresh run state
+  setLives(3);
+  livesRef.current = 3;
+
+  invincibleUntilRef.current = 0;
+  flyUntilRef.current = 0;
+
+  magnetUntilRef.current = 0;
+  boostUntilRef.current  = 0;
+  shieldUntilRef.current = 0;
+  doubleUntilRef.current = 0;
+  riskUntilRef.current   = 0;
+
+  setTimeout(() => setCountdown(countdownSeconds), 0);
+};
+
   const handleSubmit = async () => { if (onSubmitScore) await onSubmitScore(score); };
 
   const handleShare = () => {
@@ -1226,6 +1703,7 @@ export default function Runner3D({
     <div ref={containerRef} style={{ display: 'grid', gap: 10, justifyItems: 'center' }}>
       <div style={{ position: 'relative' }}>
         <div
+        
           ref={mountRef}
           style={{
             width: size.w,
@@ -1239,11 +1717,19 @@ export default function Runner3D({
         />
 
         {/* HUD Top Row */}
-        <div style={{ position: 'absolute', top: 8, left: 10, right: 10, display: 'flex', justifyContent: 'space-between', gap: 12, fontWeight: 700 }}>
-          <span>Score {score}</span>
-          <span>Best {best}</span>
-          <span>Speed {speedView}</span>
-        </div>
+<div style={{ position: 'absolute', top: 8, left: 10, right: 10, display: 'flex', justifyContent: 'space-between', gap: 12, fontWeight: 700 }}>
+  <span>Score {score}</span>
+  <span>Best {best}</span>
+  <span>Speed {speedView}</span>
+  <span>Lives {'❤'.repeat(lives)}{Array.from({length: Math.max(0, 3 - lives)}).map((_,i)=>'♡')}</span>
+</div>
+
+<div style={{ position: 'absolute', top: 24, left: 10, fontSize: 12, opacity: 0.8 }}>
+  <span style={{ display: 'inline-block', marginRight: 10 }}>
+    ▢ with glow = Air obstacle
+  </span>
+  <span>● on ground = Air marker</span>
+</div>
 
         {/* Power-up badges */}
         <div style={{ position: 'absolute', top: 36, left: 0, right: 0, display: 'flex', justifyContent: 'center', gap: 8 }}>
@@ -1253,30 +1739,30 @@ export default function Runner3D({
           <Badge color="#ff66d9" label="Double" pct={badgePct.dbl} />
         </div>
 
-        {/* Start / Pause / Settings */}
-        <div style={{ position: 'absolute', top: 8, right: 10, display: 'flex', gap: 8 }}>
-          {running || paused ? (
-            <>
-              <button onClick={() => setPaused(p => !p)} style={chip}>{paused ? 'Resume' : 'Pause'}</button>
-              <button onClick={() => setShowSettings(true)} style={chip}>Settings</button>
-            </>
-          ) : (
-            <>
-              <button onClick={handleStart} style={chip}>Start</button>
-              <button onClick={() => setShowSettings(true)} style={chip}>Settings</button>
-            </>
-          )}
-        </div>
+{/* Start / Pause / (no Settings in modes) */}
+<div style={{ position: 'absolute', top: 8, right: 10, display: 'flex', gap: 8 }}>
+  {running || paused ? (
+    <>
+      <button onClick={() => setPaused(p => !p)} style={chip}>{paused ? 'Resume' : 'Pause'}</button>
+      <button onClick={() => { setShowBoard(true); }} style={chip}>Leaderboard</button>
+    </>
+  ) : (
+    <>
+      <button onClick={handleStart} style={chip}>Start</button>
+      <button onClick={() => { setShowBoard(true); }} style={chip}>Leaderboard</button>
+    </>
+  )}
+</div>
 
         {/* Combo meter */}
         <div style={{ position: 'absolute', left: 10, right: 10, bottom: 12 }}>
           <ComboBar mult={comboInfo.mult} pct={comboInfo.pct} />
         </div>
 
-        {/* Idle Play overlay */}
-        {!running && !dead && countdown === null && (
-          <div style={overlay}><button onClick={handleStart} style={bigPlayBtn}>Play</button></div>
-        )}
+{/* Title / Start Screen */}
+{showTitle && !running && !dead && countdown === null && (
+  <StartScreen onStart={handleStart} />
+)}
 
         {/* Countdown */}
         {countdown !== null && (<div style={overlay}><div style={bubble}>{countdown}</div></div>)}
@@ -1287,11 +1773,12 @@ export default function Runner3D({
             <div style={panel}>
               <h3 style={{ margin: 0 }}>Game over</h3>
               <p style={{ margin: '6px 0 12px 0' }}>Score {score}</p>
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
-                <button onClick={handleRetry} style={btn}>Retry</button>
-                <button onClick={handleSubmit} style={btn}>Submit</button>
-                <button onClick={handleShare} style={btn} disabled={!canShare}>Share</button>
-              </div>
+<div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
+  <button onClick={handleRetry} style={btn}>Replay</button>
+  <button onClick={handleSubmit} style={btn}>Submit</button>
+  <button onClick={() => setShowBoard(true)} style={btn}>Leaderboard</button>
+  <button onClick={handleShare} style={btn} disabled={!canShare}>Share</button>
+</div>
             </div>
           </div>
         )}
@@ -1301,10 +1788,10 @@ export default function Runner3D({
           <div style={overlay}>
             <div style={{ ...panel, backdropFilter: 'blur(6px)' as any }}>
               <h3 style={{ marginTop: 0, marginBottom: 10 }}>Paused</h3>
-              <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
-                <button onClick={() => setPaused(false)} style={btn}>Resume</button>
-                <button onClick={() => setShowSettings(true)} style={btn}>Settings</button>
-              </div>
+<div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
+  <button onClick={() => setPaused(false)} style={btn}>Resume</button>
+</div>
+
               <p style={{ opacity: 0.7, marginTop: 10, fontSize: 12 }}>
                 Press <kbd>Esc</kbd> to resume
               </p>
@@ -1322,7 +1809,7 @@ export default function Runner3D({
         </div>
       )}
 
-      {showSettings && (
+{SHOW_SETTINGS && showSettings && (
         <div style={drawerOverlay} onClick={() => setShowSettings(false)}>
           <div style={drawer} onClick={e => e.stopPropagation()}>
             <h3 style={{ marginTop: 0 }}>Settings</h3>
@@ -1347,15 +1834,6 @@ export default function Runner3D({
             </div>
 
             <div style={row}>
-              <label>Mode</label>
-              <select value={mode} onChange={e => setMode(e.target.value as any)} style={select}>
-                <option value="endless">Endless</option>
-                <option value="boss">Boss Run</option>
-                <option value="daily">Daily Run</option>
-              </select>
-            </div>
-
-            <div style={row}>
               <label>Assist Mode</label>
               <input type="checkbox" checked={assist} onChange={e => setAssist(e.target.checked)} />
             </div>
@@ -1364,13 +1842,46 @@ export default function Runner3D({
               Upgrades — Jump: {upg.jump} • Magnet: {upg.magnet} • Slide: {upg.slide} • Streak: {streak}d
             </div>
 
-            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-              <button onClick={() => setShowSettings(false)} style={btn}>Close</button>
-              {!running && !dead && <button onClick={handleStart} style={btn}>Start</button>}
-            </div>
+<div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+  <button
+    onClick={() => { setShowSettings(false); if (running) setPaused(false); }}
+    style={btn}
+  >
+    Close
+  </button>
+  {!running && !dead && <button onClick={handleStart} style={btn}>Start</button>}
+</div>
+
           </div>
         </div>
       )}
+      {showBoard && (
+  <div style={drawerOverlay} onClick={() => setShowBoard(false)}>
+    <div style={drawer} onClick={e => e.stopPropagation()}>
+      <h3 style={{ marginTop: 0 }}>Leaderboard (Local)</h3>
+      <div style={{ maxHeight: 260, overflow: 'auto', paddingRight: 6 }}>
+        {board.length === 0 ? (
+          <div style={{ opacity: 0.7 }}>No scores yet — play a run!</div>
+        ) : (
+          <ol style={{ margin: 0, paddingLeft: 18 }}>
+            {board.map((r, i) => (
+              <li key={i} style={{ margin: '6px 0', display: 'flex', justifyContent: 'space-between' }}>
+                <span>Score {r.score}</span>
+                <span style={{ opacity: 0.7, fontSize: 12 }}>
+                  {new Date(r.at).toLocaleString()}
+                </span>
+              </li>
+            ))}
+          </ol>
+        )}
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+        <button onClick={() => setShowBoard(false)} style={btn}>Close</button>
+        <button onClick={() => { localStorage.removeItem('hyper-board'); loadBoard(); }} style={btn}>Clear</button>
+      </div>
+    </div>
+  </div>
+)}
     </div>
   );
 }
@@ -1410,6 +1921,49 @@ function ComboBar({ mult, pct }: { mult: number; pct: number }) {
       </div>
       <div style={{ width: '100%', height: 10, background: '#222', borderRadius: 8, overflow: 'hidden', border: '1px solid #333' }}>
         <div style={{ width: `${w}%`, height: '100%', background: 'linear-gradient(90deg, #ffe066, #6e59ff)' }} />
+      </div>
+    </div>
+  );
+}
+
+function StartScreen({ onStart }: { onStart: () => void }) {
+  return (
+    <div style={{
+      position: 'absolute',
+      inset: 0,
+      display: 'grid',
+      placeItems: 'center',
+      background: 'linear-gradient(180deg, #0b0b12 0%, #0a0a0a 100%)'
+    }}>
+      <div style={{
+        textAlign: 'center',
+        padding: 20,
+        borderRadius: 16,
+        border: '1px solid #222',
+        background: '#0f0f12aa',
+        color: '#fff',
+        minWidth: 260
+      }}>
+        <div style={{ fontSize: 28, fontWeight: 900, letterSpacing: 1, marginBottom: 6 }}>
+          HYPER RUN
+        </div>
+        <div style={{ opacity: 0.8, marginBottom: 16 }}>
+          Dodge • Jump • Slide — chain combos for speed
+        </div>
+        <button onClick={onStart} style={{
+          padding: '14px 28px',
+          borderRadius: 16,
+          border: '1px solid #444',
+          background: '#1a1a1a',
+          color: '#fff',
+          fontSize: 20,
+          fontWeight: 800
+        }}>
+          Tap / Click to Start
+        </button>
+        <div style={{ marginTop: 12, fontSize: 12, opacity: 0.7 }}>
+          Press ←/→ to switch lanes • Space to jump • ↓ to slide
+        </div>
       </div>
     </div>
   );
