@@ -911,25 +911,27 @@ const matHeart = new THREE.MeshStandardMaterial({
 
 // ---- Spawner (uses the materials above) ----
 function spawnPower(zPos: number) {
-  const laneX = lanes[Math.floor(rand() * lanes.length)];
-  const r = rand();
+const laneX = lanes[Math.floor(rand() * lanes.length)];
+const r = rand();
 
-  // 8% risk, 6% wings, 3% heart, rest distributed across the classics
-  const kind: PowerKind =
-    r < 0.26 ? 'magnet' :
-    r < 0.52 ? 'boost'  :
-    r < 0.74 ? 'shield' :
-    r < 0.89 ? 'double' :
-    r < 0.85 ? 'wings'  :
-    r < 0.98 ? 'heart'  : 'risk';
+// TEMP: force wings to test
+const FORCE_WINGS = true; // ← set to false when done testing
 
-  const mat =
-    kind === 'magnet' ? matMagnet :
-    kind === 'boost'  ? matBoost  :
-    kind === 'shield' ? matShield :
-    kind === 'double' ? matDouble :
-    kind === 'wings'  ? matWings  :
-    kind === 'heart'  ? matHeart  : matRisk;
+const kind: PowerKind = FORCE_WINGS ? 'wings' :
+  r < 0.15 ? 'magnet' :
+  r < 0.30 ? 'boost'  :
+  r < 0.45 ? 'shield' :
+  r < 0.60 ? 'double' :
+  r < 0.85 ? 'wings'  :
+  r < 0.93 ? 'heart'  : 'risk';
+
+const mat =
+  kind === 'magnet' ? matMagnet :
+  kind === 'boost'  ? matBoost  :
+  kind === 'shield' ? matShield :
+  kind === 'double' ? matDouble :
+  kind === 'wings'  ? matWings  :
+  kind === 'heart'  ? matHeart  : matRisk;
 
   const m = new THREE.Mesh(ico, mat);
   m.position.set(laneX, 0.9, zPos);
