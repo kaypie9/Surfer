@@ -167,7 +167,6 @@ const mountRef = useRef<HTMLDivElement | null>(null);
 const cleanupRef = useRef<(() => void) | null>(null);
 const rafRef = useRef<RAF>(null);
 const startedRef = useRef(false); // ← prevents double start
-const flyNextZRef = useRef(-4); // next sky row z; -4 is near the camera
 
   // game state
   const [running, setRunning] = useState(false);
@@ -257,13 +256,10 @@ useEffect(() => {
   const shieldUntilRef = useRef(0);
   const doubleUntilRef = useRef(0);
 const riskUntilRef   = useRef(0); 
-const flyUntilRef    = useRef(0);
+const flyUntilRef = useRef(0)
 
 // flight coin control
-const flyRowsLeftRef = useRef(0);       // how many rows we still may spawn this flight
-const flySpawnCooldownRef = useRef(0);  // small delay between sky rows
 const invincibleUntilRef = useRef(0); // post-hit grace window
-const wasFlyingRef = useRef(false);
 const [lives, setLives] = useState(3);
 const livesRef = useRef(3);
 useEffect(() => { livesRef.current = lives; }, [lives]);
@@ -866,37 +862,6 @@ const geo = pool[Math.floor(rand() * pool.length)];
       orbs.push({ mesh: m, aabb: sphere, active: true, z: zPos });
     }
 
-function spawnSkyRow(zPos: number) {
-  const ySky = 2.5;
-  const lanes = [-1.2, 0, 1.2];
-
-  // choose 1 or 2 random lanes (never all 3)
-  const shuffled = lanes.sort(() => Math.random() - 0.5);
-  const count = Math.random() < 0.55 ? 1 : 2; // 55% one coin, 45% two coins
-
-  for (let i = 0; i < count; i++) {
-    const x = shuffled[i];
-    const m = new THREE.Mesh(orbGeo, orbMat);
-    m.position.set(x, ySky, zPos);
-    scene.add(m);
-    const sphere = new THREE.Sphere(m.position, 0.22);
-    orbs.push({ mesh: m, aabb: sphere, active: true, z: zPos });
-  }
-}
-
-
-// Start a 3s flight and pre-spawn rows right by the camera
-// Start a 5s flight; sky coins begin 1.5s after liftoff
-function startFlight(now: number) {
-  flyUntilRef.current = now + 5000;       // 5 seconds
-  flyRowsLeftRef.current = 14;            // limit rows per flight
-  flySpawnCooldownRef.current = now + 1500; // first sky row 1.5s after liftoff
-
-  flyNextZRef.current = -4;               // spawn first row right near the camera
-}
-
-
-
     const powers: Power[] = [];
 // ---- Power geo + materials (must be before spawnPower) ----
 const ico = new THREE.IcosahedronGeometry(0.26, 0);
@@ -929,15 +894,14 @@ function spawnPower(zPos: number) {
   const r = rand();
 
 // TEMP: force wings to test
-const FORCE_WINGS = true; // ← set to false when done testing
+const FORCE_WINGS = false; // ← set to false when done testing
 
   // 8% risk, 6% wings, 3% heart, rest distributed across the classics
-  const kind: PowerKind = FORCE_WINGS ? 'wings' :
+  const kind: PowerKind =
     r < 0.26 ? 'magnet' :
     r < 0.52 ? 'boost'  :
     r < 0.74 ? 'shield' :
     r < 0.89 ? 'double' :
-    r < 0.82 ? 'wings'  :
     r < 0.98 ? 'heart'  : 'risk';
 
   const mat =
@@ -945,7 +909,6 @@ const FORCE_WINGS = true; // ← set to false when done testing
     kind === 'boost'  ? matBoost  :
     kind === 'shield' ? matShield :
     kind === 'double' ? matDouble :
-    kind === 'wings'  ? matWings  :
     kind === 'heart'  ? matHeart  : matRisk;
 
   const m = new THREE.Mesh(ico, mat);
@@ -1113,21 +1076,6 @@ if (pausedRef.current) {
     fpsSmoothed = fpsSmoothed * 0.9 + instantFPS * 0.1;
     lastFrameTime = now;
 const inSky = now < flyUntilRef.current;
-if (inSky) {
-  wasFlyingRef.current = true;
-} else if (wasFlyingRef.current) {
-  // just landed — cancel any pending sky rows
-flyRowsLeftRef.current = 0;
-flySpawnCooldownRef.current = 0;
-wasFlyingRef.current = false;
-  // optional: remove any sky coins that are still around
-  for (const orb of orbs) {
-    if (orb.active && orb.mesh.position.y > 1.5) {
-      orb.active = false;
-      scene.remove(orb.mesh);
-    }
-  }
-}
 
     if (fpsSmoothed < TARGET_FPS - 8) {
       renderer.shadowMap.enabled = false;
@@ -1468,20 +1416,6 @@ if (orbs.filter(o => o.active).length < 12) {
   spawnOrb(Math.min(lastZ, -10) - 9 - Math.random() * 6);
 }
 
-// Extra gold rows in the sky while flying (near-camera, capped, paced)
-if (inSky) {
-  if (now >= flyUntilRef.current) {
-    flyRowsLeftRef.current = 0;
-  } else if (flyRowsLeftRef.current > 0 && now >= flySpawnCooldownRef.current) {
-    // spawn at the cursor near the camera, then march forward
-    const nextZ = flyNextZRef.current;
-    spawnSkyRow(nextZ);
-    flyNextZRef.current -= 3.6;            // spacing between rows
-    flyRowsLeftRef.current--;
-    flySpawnCooldownRef.current = now + 150; // pace: ~6-7 rows/sec
-  }
-}
-
 
     // --- powers ---
     for (const pwr of powers) {
@@ -1589,7 +1523,6 @@ if (pwr.kind === 'boost')  { boostUntilRef.current = now + BOOST_MS; playBoost()
 if (pwr.kind === 'shield') shieldUntilRef.current = now + SHIELD_MS;
 if (pwr.kind === 'double') doubleUntilRef.current = now + DOUBLE_MS;
 if (pwr.kind === 'risk')   riskUntilRef.current   = now + RISK_MS;
-if (pwr.kind === 'wings')  { startFlight(now); }
 if (pwr.kind === 'heart')  { setLives(v => Math.min(3, v + 1)); }
 
       }
