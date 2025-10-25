@@ -4,6 +4,7 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 import { Howl, Howler } from 'howler';
+import { useAccount, useConnect, useDisconnect } from 'wagmi';
 
 // STEP 1. helper to mount a full bleed background video behind the WebGL canvas
 function mountBackgroundVideo(mount: HTMLElement) {
@@ -2282,6 +2283,21 @@ function StartScreen({
   musicOn: boolean;
   onToggleMusic: () => void;
 }) {
+
+const { address, isConnected, status } = useAccount();
+const { connect, connectors, isPending } = useConnect();
+const { disconnect } = useDisconnect();
+
+const fcConnector = connectors.find(c => c.id.includes('farcaster')) ?? connectors[0];
+
+
+const onConnect = () => {
+  if (!isConnected && fcConnector) connect({ connector: fcConnector });
+};
+
+const short = (a?: string) =>
+  a ? `${a.slice(0, 6)}…${a.slice(-4)}` : '';
+
   // simple neon helpers
   const neonTitle: React.CSSProperties = {
     fontSize: 56,
@@ -2380,25 +2396,24 @@ function StartScreen({
     Dodge • Jump • Slide — chain combos for speed
   </div>
 
-  <button
-    style={{
-      padding: '12px 28px',
-      borderRadius: 14,
-      fontWeight: 900,
-      fontSize: 14,
-      border: '1px solid #00ff88',
-      background: 'linear-gradient(180deg,#00ff88 0%,#008844 100%)',
-      color: '#000',
-      boxShadow: '0 0 18px rgba(0,255,136,0.6), 0 0 30px rgba(0,255,136,0.3)',
-      cursor: 'pointer',
-    }}
-    onClick={() => {
-      // open wallet connection logic
-      console.log('connect wallet clicked');
-    }}
-  >
-    CONNECT WALLET
-  </button>
+<button
+  style={{
+    padding: '12px 28px',
+    borderRadius: 14,
+    fontWeight: 900,
+    fontSize: 14,
+    border: '1px solid #00ff88',
+    background: 'linear-gradient(180deg,#00ff88 0%,#008844 100%)',
+    color: '#000',
+    boxShadow: '0 0 18px rgba(0,255,136,0.6), 0 0 30px rgba(0,255,136,0.3)',
+    cursor: 'pointer',
+    opacity: isPending ? 0.7 : 1,
+  }}
+  onClick={() => { if (!isConnected && fcConnector) connect({ connector: fcConnector }); }}
+  disabled={isConnected || isPending}
+>
+  {isConnected ? 'CONNECTED' : isPending ? 'CONNECTING…' : 'CONNECT WALLET'}
+</button>
 </div>
 
 

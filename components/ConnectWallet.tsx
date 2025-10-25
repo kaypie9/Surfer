@@ -1,43 +1,34 @@
-'use client';
+'use client'
 
-import { useAccount, useConnect, useDisconnect } from 'wagmi';
-import { farcasterMiniApp } from '@farcaster/miniapp-wagmi-connector';
+import { ReactNode } from 'react'
+import { useAccount, useConnect, useDisconnect } from 'wagmi'
+import { farcasterMiniApp } from '@farcaster/miniapp-wagmi-connector'
 
-const btn: React.CSSProperties = {
-  background: '#8e44ad',
-  color: '#fff',
-  border: 'none',
-  padding: '8px 12px',
-  borderRadius: 12,
-  fontWeight: 700,
-  cursor: 'pointer',
-};
+type Api = {
+  address?: `0x${string}`
+  isConnected: boolean
+  isPending: boolean
+  connectFc: () => void
+  disconnect: () => void
+}
 
-export default function ConnectWallet() {
-  const { address, isConnected } = useAccount();
-  const { connect, isPending } = useConnect();
-  const { disconnect } = useDisconnect();
+export default function ConnectWallet({
+  children,
+}: {
+  children?: (api: Api) => ReactNode
+}) {
+  const { address, isConnected } = useAccount()
+  const { connect, isPending } = useConnect()
+  const { disconnect } = useDisconnect()
 
-  const short = (a?: `0x${string}`) => (a ? `${a.slice(0, 6)}…${a.slice(-4)}` : '');
-
-  if (!isConnected) {
-    return (
-      <button
-        style={btn}
-        onClick={() => connect({ connector: farcasterMiniApp() })}
-        disabled={isPending}
-      >
-        {isPending ? 'Connecting…' : 'Connect'}
-      </button>
-    );
+  const api: Api = {
+    address,
+    isConnected,
+    isPending,
+    connectFc: () => connect({ connector: farcasterMiniApp() }),
+    disconnect,
   }
 
-  return (
-    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-      <span style={{ fontWeight: 700 }}>{short(address as any)}</span>
-      <button style={{ ...btn, background: '#2a1f3b' }} onClick={() => disconnect()}>
-        Disconnect
-      </button>
-    </div>
-  );
+  // no default button, only render what’s passed as children
+  return children ? <>{children(api)}</> : null
 }

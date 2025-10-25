@@ -1,17 +1,16 @@
+// app/layout.tsx
 import type { Metadata } from 'next';
-import Providers from '@/components/providers';
+import Providers from '@/components/providers'; // <-- NOTE: using your `componants` folder
 
 export const metadata: Metadata = {
-  title: 'Flappy Mini',
+  title: 'Hyper Run',
+  description: 'Neon runner',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"/>
-      </head>
-      <body style={{ margin: 0, height: '100dvh', overflow: 'hidden', background: '#0a0713', color: '#fff' }}>
+      <body>
         <Providers>{children}</Providers>
       </body>
     </html>

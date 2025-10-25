@@ -3,6 +3,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import { Overlay } from './ui/Overlay';
+import ConnectWallet from './ConnectWallet';
 
 const Runner3D = dynamic(() => import('./Runner3D'), { ssr: false });
 
@@ -128,6 +129,16 @@ return (
         } as any)}
       />
     </div>
+    
+        {/* connect wallet on home (menu) only */}
+    {!isRunning && !isDead && (
+      <div className="absolute left-0 right-0 z-20" style={{ top: '58%' }}>
+        <div className="flex justify-center">
+          <ConnectWallet />
+        </div>
+      </div>
+    )}
+
 
     {/* top right pause button */}
     {isRunning && !isPaused && (
