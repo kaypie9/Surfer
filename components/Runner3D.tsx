@@ -2291,20 +2291,28 @@ function IdBadge() {
   const [fid, setFid] = useState<number | null>(null);
 
   useEffect(() => {
+  let active = true;
+  (async () => {
     try {
       const anySdk: any = sdk;
-      const v =
+      const fidCandidate =
         anySdk?.viewer?.fid ??
         anySdk?.state?.viewer?.fid ??
         anySdk?.context?.viewer?.fid ??
         anySdk?.frameContext?.fid ??
-        anySdk?.params?.fid ??
+        (await anySdk?.actions?.getViewer?.())?.fid ??
         null;
-      if (v != null) setFid(Number(v));
-    } catch {}
-  }, []);
+      if (active && fidCandidate != null) setFid(Number(fidCandidate));
+    } catch (err) {
+      console.warn('failed to get fid', err);
+    }
+  })();
+  return () => {
+    active = false;
+  };
+}, []);
 
-  const short = address ? address.slice(2, 7) : '-----';
+const short = address ? `0x${address.slice(2, 7)}` : '-----';
 
   return (
 <div
