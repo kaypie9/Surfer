@@ -5,6 +5,50 @@ import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import * as THREE from 'three';
 import { Howl, Howler } from 'howler';
 
+// STEP 1. helper to mount a full bleed background video behind the WebGL canvas
+function mountBackgroundVideo(mount: HTMLElement) {
+  // container must stack children
+  mount.style.position = 'relative'
+  mount.style.overflow = 'hidden'
+
+  const bgVideo = document.createElement('video')
+  bgVideo.src = '/media/retro.mp4'
+  bgVideo.autoplay = true
+  bgVideo.loop = true
+  bgVideo.muted = true
+  bgVideo.playsInline = true
+
+  Object.assign(bgVideo.style, {
+    position: 'absolute',
+    inset: '0',
+    width: '100%',
+    height: '100%',
+    objectFit: 'cover',
+    zIndex: '0',
+    pointerEvents: 'none',
+  } as CSSStyleDeclaration)
+
+  mount.prepend(bgVideo)
+
+  // autoplay fallback
+  bgVideo.play().catch(() => {
+    const resume = () => {
+      bgVideo.play().finally(() => {
+        window.removeEventListener('pointerdown', resume)
+        window.removeEventListener('touchstart', resume)
+      })
+    }
+    window.addEventListener('pointerdown', resume, { once: true })
+    window.addEventListener('touchstart', resume, { once: true })
+  })
+
+  // return a cleanup
+  return () => {
+    try { bgVideo.pause() } catch {}
+    if (bgVideo.parentNode) bgVideo.parentNode.removeChild(bgVideo)
+  }
+}
+
 // RNG seeded by daily seed / world seed
 function lerp(a: number, b: number, t: number) { return a + (b - a) * t; }
 function hsl(h: number, s: number, l: number) { return `hsl(${h} ${s}% ${l}%)`; }
@@ -102,13 +146,14 @@ const WORLD_THEMES: Record<WorldTheme, any> = {
 
 // player + movement
 const PLAYER_RADIUS = 0.36;
-const PLAYER_GROUND_Y = 0.5;
-const JUMP_STRENGTH_BASE = 0.2;
+const GROUND_Y = 0.00;                  // single source of truth for the floor
+const PLAYER_GROUND_Y = GROUND_Y + PLAYER_RADIUS; // player center sits on the floor
+const JUMP_STRENGTH_BASE = 0.16;
 const GRAVITY = 0.01;
 
 // Air obstacle tuning (harder to clear with single jump)
-const AIR_OBS_H = 1.2;   // was ~0.9
-const AIR_OBS_Y = 1.35;  // was ~1.0–1.05
+const AIR_OBS_H = 1.5;   // was ~0.9
+const AIR_OBS_Y = GROUND_Y + 1.3;  // was ~1.0–1.05
 
 // slide (manual; ends after duration)
 const SLIDE_COOLDOWN_MS = 200;
@@ -163,6 +208,7 @@ export default function Runner3D({
 }: Props) {
   // mounts & raf
 const containerRef = useRef<HTMLDivElement | null>(null);
+const bgVideoRef = useRef<HTMLVideoElement | null>(null);
 const mountRef = useRef<HTMLDivElement | null>(null);
 const cleanupRef = useRef<(() => void) | null>(null);
 const rafRef = useRef<RAF>(null);
@@ -182,7 +228,9 @@ const startedRef = useRef(false); // ← prevents double start
 const audioReadyRef = useRef(false);
 const sfxRef = useRef<{
   jump?: Howl; pickup?: Howl; slide?: Howl; hit?: Howl; boost?: Howl; music?: Howl;
+  whoosh?: Howl; warn?: Howl; hit2?: Howl;
 } | null>(null);
+
 
   // assists + upgrades
   const [assist, setAssist] = useState(false);
@@ -205,6 +253,9 @@ const sfxRef = useRef<{
   // Share replay toggle
   const [canShare, setCanShare] = useState(false);
 const [showBoard, setShowBoard] = useState(false);
+// Start-screen music toggle (neon page)
+const [musicOn, setMusicOn] = useState(true);
+
 const [board, setBoard] = useState<{score:number; at:number}[]>([]);
 
 function loadBoard() {
@@ -224,6 +275,57 @@ function saveScoreLocal(score:number) {
 }
 useEffect(() => { loadBoard(); }, []);
 
+// Preload and mount the background video once (so Start is instant)
+useEffect(() => {
+  const mount = mountRef.current;
+  if (!mount || bgVideoRef.current) return;
+
+  mount.style.position = 'relative';
+  mount.style.overflow = 'hidden';
+
+  const v = document.createElement('video');
+  v.src = '/media/retro.mp4';
+  v.preload = 'auto';    // start fetching immediately
+  v.muted = true;        // required for autoplay
+  v.playsInline = true;
+  v.loop = true;
+  v.autoplay = true;
+
+  Object.assign(v.style, {
+    position: 'absolute',
+    inset: '0',
+    width: '100%',
+    height: '100%',
+    objectFit: 'cover',
+    zIndex: '0',
+    pointerEvents: 'none',
+  } as CSSStyleDeclaration);
+
+  mount.prepend(v);
+  bgVideoRef.current = v;
+
+  // Begin loading/buffering now
+  try { v.load(); } catch {}
+
+  // Autoplay unlock fallback (iOS)
+  v.play().catch(() => {
+    const resume = () => {
+      v.play().finally(() => {
+        window.removeEventListener('pointerdown', resume);
+        window.removeEventListener('touchstart', resume);
+      });
+    };
+    window.addEventListener('pointerdown', resume, { once: true });
+    window.addEventListener('touchstart', resume, { once: true });
+  });
+
+  return () => {
+    try { v.pause(); } catch {}
+    if (v.parentNode) v.parentNode.removeChild(v);
+    bgVideoRef.current = null;
+  };
+}, []);
+
   // Beat clock
   const beatRef = useRef(0);
 
@@ -237,7 +339,11 @@ useEffect(() => {
   const idle = (window as any).requestIdleCallback || ((cb: any) => setTimeout(cb, 400));
   const cancel = (window as any).cancelIdleCallback || clearTimeout;
   const id = idle(() => {
-    ['/sounds/jump.mp3','/sounds/pickup.mp3','/sounds/slide.mp3','/sounds/hit.mp3','/sounds/boost.mp3','/sounds/theme.mp3']
+[
+  '/sounds/jump.mp3','/sounds/pickup.mp3','/sounds/slide.mp3','/sounds/hit.mp3',
+  '/sounds/boost.mp3','/sounds/theme.mp3',
+  '/sounds/whoosh.mp3','/sounds/warn.mp3','/sounds/hit_bass.mp3'
+]
       .forEach(src => { const a = new Audio(); a.preload = 'auto'; a.src = src; a.load(); });
   });
   return () => cancel(id);
@@ -247,12 +353,11 @@ useEffect(() => {
   const [world, setWorld] = useState<WorldTheme>('neonCity');
 
   // HUD power badges + combo meter
-  const [badgePct, setBadgePct] = useState({ magnet: 0, boost: 0, shield: 0, dbl: 0 });
+const [badgePct, setBadgePct] = useState({ magnet: 0, shield: 0, dbl: 0 });
   const [comboInfo, setComboInfo] = useState<{ mult: number; pct: number }>({ mult: 1, pct: 0 });
 
   // timers for HUD
   const magnetUntilRef = useRef(0);
-  const boostUntilRef = useRef(0);
   const shieldUntilRef = useRef(0);
   const doubleUntilRef = useRef(0);
 const riskUntilRef   = useRef(0); 
@@ -277,9 +382,25 @@ const prevXRef      = useRef(0);
 const pausedRef = useRef(false);
 const deadRef   = useRef(false);
 
+// --- FX & cues ---
+const laneChangeAtRef = useRef(0);
+const laneTiltDirRef = useRef<1 | -1>(1);
+
+const hitFlashUntilRef = useRef(0);
+const comboSparkleUntilRef = useRef(0);
+
+// Boss warning pre-roll
+const bossWarnUntilRef = useRef(0);
+const bossWarnedForRef = useRef<number | null>(null);
+const [bossWarning, setBossWarning] = useState(false);
+
 useEffect(() => { pausedRef.current = paused; }, [paused]);
 useEffect(() => { deadRef.current   = dead;   }, [dead]);
 
+// Reflect start screen toggle in Howler
+useEffect(() => {
+  try { Howler.mute(!musicOn); } catch {}
+}, [musicOn]);
 
   // chain boost tracking
   const chainTimesRef = useRef<number[]>([]);
@@ -398,7 +519,7 @@ useEffect(() => {
     return new THREE.CanvasTexture(c);
   }
 
-const startGame = useCallback(() => {
+function startGame() {
   if (!mountRef.current) return;
 
   // prevent starting twice
@@ -419,25 +540,50 @@ const rand = mulberry32((dailySeed ^ 0xB055) ^ runSalt);
 
   // (keep the rest of your startGame code after this line unchanged…)
 
-    // scene/camera/renderer
-    const scene = new THREE.Scene();
-    scene.fog = new THREE.Fog(colors.fog[0], colors.fog[1], colors.fog[2]);
+// scene/camera/renderer
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(colors.fog[0], colors.fog[1], colors.fog[2]);
 
+// ✅ new camera setup
 const camera = new THREE.PerspectiveCamera(FIXED_FOV, W / H, 0.1, 500);
-// Subway Surfers–style starting pose: slightly higher + behind
-camera.position.set(0, 3.2, 7.2);
-camera.rotation.set(0, 0, 0);
-camera.fov = 62;
+camera.position.set(0, 2.8, 7.0);
+camera.up.set(0, 1, 0); // <— y is “up”
 camera.updateProjectionMatrix();
 
 
+// ensure the parent can stack children
+mount.style.position = 'relative';
 
-    const renderer = new THREE.WebGLRenderer({ antialias: quality >= 2, alpha: true });
+// 2) create the WebGL canvas on top
+const renderer = new THREE.WebGLRenderer({ antialias: quality >= 2, alpha: true });
 renderer.setPixelRatio(Math.min((window.devicePixelRatio || 1), quality, 2));
-    renderer.setSize(W, H);
-    renderer.shadowMap.enabled = quality >= 2;
-    mount.innerHTML = '';
-    mount.appendChild(renderer.domElement);
+renderer.setSize(W, H);
+renderer.shadowMap.enabled = quality >= 2;
+
+// make sure canvas sits above video
+Object.assign(renderer.domElement.style, {
+  position: 'relative',
+  zIndex: '1',
+  display: 'block',
+  width: '100%',
+  height: '100%',
+});
+
+mount.appendChild(renderer.domElement);
+
+// 3) keep video sizing correct on resize
+function onResize() {
+  const { clientWidth, clientHeight } = mount;
+  const W = clientWidth;
+  const H = clientHeight;
+  renderer.setSize(W, H, false);
+  camera.aspect = W / H;
+  camera.updateProjectionMatrix();
+}
+
+window.addEventListener('resize', onResize);
+
+
 
     // --- WebAudio micro fx ---
     const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
@@ -465,21 +611,19 @@ const playBoost  = () => sfxRef.current?.boost?.play();
     function stopMusic() {
       tracks.forEach(a => { a.pause(); a.currentTime = 0; });
     }
-function updateMusic(speedMult: number, comboMult: number) {
+
+function updateMusic(scrollSpeed: number, comboMult: number) {
   const c = Math.min(5, comboMult);
-  const boosting = speedMult > 1.01;
+  const fast = scrollSpeed > 0.60; // tweak threshold to taste
 
-  // bass / pads follow overall intensity
-  const intensity = Math.min(1.6, (boosting ? 1.0 : 0.7) + c * 0.15);
-  tracks[0].volume = 0.22 + 0.22 * intensity;          // bass
-  tracks[1].volume = 0.18 + 0.14 * intensity;          // pads
-
-  // arps come up from combo 3+
-  tracks[2].volume = c >= 3 ? Math.min(0.55, 0.15 + c * 0.08) : 0.0;
-
-  // drums punch on boost
-  tracks[3].volume = boosting ? 0.55 : 0.20;
+  const intensity = Math.min(1.6, (fast ? 1.0 : 0.7) + c * 0.15);
+  tracks[0].volume = 0.22 + 0.22 * intensity; // bass
+  tracks[1].volume = 0.18 + 0.14 * intensity; // pads
+  tracks[2].volume = c >= 3 ? Math.min(0.55, 0.15 + c * 0.08) : 0.0; // arps
+  tracks[3].volume = fast ? 0.55 : 0.20; // drums
 }
+
+
 
     setCanShare(true);
     startMusic();
@@ -488,13 +632,29 @@ function updateMusic(speedMult: number, comboMult: number) {
     const hemi = new THREE.HemisphereLight(0xccddff, 0x221144, 0.8); scene.add(hemi);
     const dir = new THREE.DirectionalLight(0xffffff, 0.7); dir.position.set(6, 10, 6); dir.castShadow = true; scene.add(dir);
 
-    // ground
-    const gridTex = makeGridTexture();
-    gridTex.wrapS = THREE.RepeatWrapping; gridTex.wrapT = THREE.RepeatWrapping; gridTex.repeat.set(1, 50);
-    const groundGeo = new THREE.PlaneGeometry(16, 400);
-    const groundMat = new THREE.MeshStandardMaterial({ color: 0x0d0d0f, roughness: 1, map: gridTex, transparent: true, opacity: 0.92 });
-    const ground = new THREE.Mesh(groundGeo, groundMat);
-    ground.rotation.x = -Math.PI / 2; ground.position.z = -160; ground.receiveShadow = true; scene.add(ground);
+    // texture for ground grid
+const gridTex = makeGridTexture();
+gridTex.wrapS = THREE.RepeatWrapping;
+gridTex.wrapT = THREE.RepeatWrapping;
+gridTex.repeat.set(1, 50);
+
+    // ground (flat fix)
+// ground (flat fix)
+const groundGeo = new THREE.PlaneGeometry(16, 400);
+const groundMat = new THREE.MeshStandardMaterial({
+  color: 0x0d0d0f,
+  roughness: 1,
+  map: gridTex,
+  transparent: true,
+  opacity: 0.92,
+});
+const ground = new THREE.Mesh(groundGeo, groundMat);
+ground.rotation.x = -Math.PI / 2;
+ground.position.y = GROUND_Y;
+ground.position.z = -120;
+ground.receiveShadow = true;
+scene.add(ground);
+
 
     // rails
     const railMat = new THREE.MeshStandardMaterial({ color: colors.rail, emissive: colors.emissive, emissiveIntensity: 0.6 });
@@ -517,6 +677,17 @@ function updateMusic(speedMult: number, comboMult: number) {
     const shieldMat = new THREE.MeshBasicMaterial({ color: colors.shield, transparent: true, opacity: 0.5, side: THREE.DoubleSide });
     const shieldMesh = new THREE.Mesh(shieldGeo, shieldMat);
     shieldMesh.rotation.x = Math.PI / 2; shieldMesh.visible = false; player.add(shieldMesh);
+
+    // magnet ring
+const magnetRingGeo = new THREE.RingGeometry(0.75, 0.95, 48);
+const magnetRingMat = new THREE.MeshBasicMaterial({
+  color: 0xffe066, transparent: true, opacity: 0.45,
+  side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false
+});
+const magnetRing = new THREE.Mesh(magnetRingGeo, magnetRingMat);
+magnetRing.rotation.x = Math.PI / 2;
+magnetRing.visible = false;
+player.add(magnetRing);
 
     // glow trail
     const trailCount = 28;
@@ -686,9 +857,53 @@ const slideDur = SLIDE_DURATION_MS * (1 + upg.slide * 0.06) * comboBoost;
     // content: obstacles/orbs/powers/crystals
     const obstacles: Obs[] = [];
 const obsGroundGeo = new THREE.BoxGeometry(0.9, 0.9, 0.9);
-const obsGroundMat = new THREE.MeshStandardMaterial({ color: colors.obstacleGround, roughness: 0.6 });
+const obsGroundMat = new THREE.MeshStandardMaterial({
+  color: colors.obstacleGround,
+  emissive: colors.obstacleGround,
+  emissiveIntensity: 2.0,
+  metalness: 0.9,
+  roughness: 0.15
+});
 const obsAirGeo = new THREE.BoxGeometry(0.9, AIR_OBS_H, 0.9); // ↑ taller
 const obsAirMat = new THREE.MeshStandardMaterial({ color: colors.obstacleAir, roughness: 0.5 });
+
+// Neon fresnel + scrolling stripe shader
+obsGroundMat.onBeforeCompile = (shader) => {
+  shader.uniforms.uTime = { value: 0 };
+  shader.uniforms.uStripeSpeed = { value: 0.6 };
+  shader.uniforms.uFresnelColor = { value: new THREE.Color(0x66ccff) };
+
+  shader.vertexShader = shader.vertexShader.replace(
+    '#include <common>',
+    `#include <common>
+     varying vec3 vWNormal;
+     varying vec3 vWPos;`
+  ).replace(
+    '#include <worldpos_vertex>',
+    `#include <worldpos_vertex>
+     vWPos = worldPosition.xyz;
+     vWNormal = normalize(mat3(modelMatrix) * normal);`
+  );
+
+  shader.fragmentShader = shader.fragmentShader.replace(
+    '#include <common>',
+    `#include <common>
+     uniform float uTime;
+     uniform float uStripeSpeed;
+     uniform vec3 uFresnelColor;
+     varying vec3 vWNormal;
+     varying vec3 vWPos;`
+  ).replace(
+    '#include <lights_fragment_begin>',
+    `#include <lights_fragment_begin>
+     float fres = pow(1.0 - abs(dot(normalize(vWNormal), normalize(cameraPosition - vWPos))), 2.0);
+     vec3 rim = uFresnelColor * fres * 0.8;
+     float stripe = smoothstep(0.45, 0.55, fract(vWPos.z*0.25 + uTime*uStripeSpeed));
+     totalEmissiveRadiance += rim + stripe * 0.6 * diffuseColor.rgb;`
+  );
+
+  (obsGroundMat as any).userData = { tick: (dt: number) => (shader.uniforms.uTime.value += dt) };
+};
 
 // mix of shapes
 const groundShapes = [
@@ -745,6 +960,26 @@ const airPoleMat = new THREE.MeshBasicMaterial({
         { type: 'air', dz: 8 },
         { type: 'ground', dz: 12 },
       ],
+      // force quick left→right→mid slalom
+[
+  { type: 'ground', dz: 0,  lane: 0 },
+  { type: 'ground', dz: 5,  lane: 2 },
+  { type: 'ground', dz: 10, lane: 1 },
+  { type: 'air',    dz: 16, lane: 1 },
+],
+// mid block → hop right → hop left
+[
+  { type: 'ground', dz: 0,  lane: 1 },
+  { type: 'air',    dz: 6,  lane: 2 },
+  { type: 'air',    dz: 12, lane: 0 },
+],
+// tight zig with air pinch
+[
+  { type: 'ground', dz: 0,  lane: 2 },
+  { type: 'air',    dz: 5,  lane: 1 },
+  { type: 'ground', dz: 10, lane: 0 },
+  { type: 'air',    dz: 15, lane: 1 },
+],
     ];
 
 function spawnObstacleWithType(zPos: number, forcingLaneIdx: number, type: ObstacleType) {
@@ -755,7 +990,7 @@ function spawnObstacleWithType(zPos: number, forcingLaneIdx: number, type: Obsta
 
   const m = new THREE.Mesh(geo, mat);
   m.castShadow = true;
-  m.position.set(laneX, isAir ? AIR_OBS_Y : 0.55, zPos);
+m.position.set(laneX, isAir ? AIR_OBS_Y : (GROUND_Y + 0.45), zPos); // 0.45 = half of 0.9 box
   scene.add(m);
 
   // Attach special visuals for AIR obstacles
@@ -769,7 +1004,7 @@ function spawnObstacleWithType(zPos: number, forcingLaneIdx: number, type: Obsta
     // 2) ground marker disk (independent mesh at Y≈ground)
     const marker = new THREE.Mesh(airMarkerGeo, airMarkerMat);
     marker.rotation.x = -Math.PI / 2;
-    marker.position.set(laneX, 0.02, zPos);
+marker.position.set(laneX, GROUND_Y + 0.02, zPos);
     scene.add(marker);
 
     // 3) slim pole from ground → bottom of obstacle
@@ -810,7 +1045,7 @@ const geo = pool[Math.floor(rand() * pool.length)];
 
   const m = new THREE.Mesh(geo, mat);
   m.castShadow = true;
-  m.position.set(laneX, isAir ? AIR_OBS_Y : 0.55, zPos);
+m.position.set(laneX, isAir ? AIR_OBS_Y : (GROUND_Y + 0.45), zPos);
   scene.add(m);
 
   // --- add the same helper visuals for AIR obstacles ---
@@ -824,7 +1059,7 @@ const geo = pool[Math.floor(rand() * pool.length)];
     // 2) ground marker disk
     const marker = new THREE.Mesh(airMarkerGeo, airMarkerMat);
     marker.rotation.x = -Math.PI / 2;
-    marker.position.set(laneX, 0.02, zPos);
+marker.position.set(laneX, GROUND_Y + 0.02, zPos);
     scene.add(marker);
 
     // 3) slim pole from ground to obstacle
@@ -856,7 +1091,7 @@ const geo = pool[Math.floor(rand() * pool.length)];
     function spawnOrb(zPos: number) {
       const laneX = lanes[Math.floor(rand() * lanes.length)];
       const m = new THREE.Mesh(orbGeo, orbMat);
-      m.position.set(laneX, 0.8 + rand() * 0.4, zPos);
+m.position.set(laneX, GROUND_Y + 0.22, zPos); // 0.22 = orb radius so it sits on the ground
       scene.add(m);
       const sphere = new THREE.Sphere(m.position, 0.22);
       orbs.push({ mesh: m, aabb: sphere, active: true, z: zPos });
@@ -897,22 +1132,21 @@ function spawnPower(zPos: number) {
 const FORCE_WINGS = false; // ← set to false when done testing
 
   // 8% risk, 6% wings, 3% heart, rest distributed across the classics
-  const kind: PowerKind =
-    r < 0.26 ? 'magnet' :
-    r < 0.52 ? 'boost'  :
-    r < 0.74 ? 'shield' :
-    r < 0.89 ? 'double' :
-    r < 0.98 ? 'heart'  : 'risk';
+const kind: PowerKind =
+  r < 0.34 ? 'magnet' :
+  r < 0.68 ? 'shield' :
+  r < 0.90 ? 'double' :
+  r < 0.97 ? 'heart'  : 'risk';
 
-  const mat =
-    kind === 'magnet' ? matMagnet :
-    kind === 'boost'  ? matBoost  :
-    kind === 'shield' ? matShield :
-    kind === 'double' ? matDouble :
-    kind === 'heart'  ? matHeart  : matRisk;
+const mat =
+  kind === 'magnet' ? matMagnet :
+  kind === 'shield' ? matShield :
+  kind === 'double' ? matDouble :
+  kind === 'heart'  ? matHeart  : matRisk;
+
 
   const m = new THREE.Mesh(ico, mat);
-  m.position.set(laneX, 0.9, zPos);
+m.position.set(laneX, GROUND_Y + 0.20, zPos);
   scene.add(m);
 
   const sphere = new THREE.Sphere(m.position, 0.28);
@@ -928,7 +1162,7 @@ const FORCE_WINGS = false; // ← set to false when done testing
     function spawnCrystal(zPos: number) {
       const laneX = lanes[Math.floor(rand() * lanes.length)];
       const m = new THREE.Mesh(cryGeo, cryMat);
-      m.position.set(laneX, 0.95 + rand()*0.4, zPos);
+m.position.set(laneX, GROUND_Y + 0.18, zPos); // 0.18 = crystal “radius” so it rests on ground
       m.rotation.y = rand()*Math.PI;
       crystals.push({ mesh: m, active: true });
       scene.add(m);
@@ -942,7 +1176,6 @@ for (let i = 1; i <= 10; i++) spawnObstacle(-i * 12);
 
     // reset timers
     magnetUntilRef.current = 0;
-    boostUntilRef.current = 0;
     shieldUntilRef.current = 0;
     doubleUntilRef.current = 0;
 
@@ -953,6 +1186,19 @@ for (let i = 1; i <= 10; i++) spawnObstacle(-i * 12);
     const onKey = (e: KeyboardEvent) => {
 if (deadRef.current || pausedRef.current) return;
       const now = performance.now();
+
+      if (e.key === 'ArrowLeft' || e.key === 'a') {
+  laneIndex = Math.max(0, laneIndex - 1);
+  laneTiltDirRef.current = -1;
+  laneChangeAtRef.current = performance.now() + 220;
+  sfxRef.current?.whoosh?.play?.();
+}
+if (e.key === 'ArrowRight' || e.key === 'd') {
+  laneIndex = Math.min(2, laneIndex + 1);
+  laneTiltDirRef.current = 1;
+  laneChangeAtRef.current = performance.now() + 220;
+  sfxRef.current?.whoosh?.play?.();
+}
 
       if (e.key === ' ' || e.key === 'ArrowUp' || e.key === 'w') {
         jumpBufferUntil = now + JUMP_BUFFER_MS;
@@ -1000,9 +1246,6 @@ if (deadRef.current || pausedRef.current) return;
           setTimeout(() => setDashReady(true), 1200);
         }
       }
-
-      if (e.key === 'ArrowLeft' || e.key === 'a') { laneIndex = Math.max(0, laneIndex - 1); }
-      if (e.key === 'ArrowRight' || e.key === 'd') { laneIndex = Math.min(2, laneIndex + 1); }
 
       // crouch toggle
       if (e.key === 'ArrowDown' || e.key === 's') {
@@ -1085,63 +1328,57 @@ const inSky = now < flyUntilRef.current;
     }
 
     t += 1;
+    (obsGroundMat as THREE.MeshStandardMaterial).emissiveIntensity = 1.5 + Math.sin(t * 0.05) * 0.5;
+const deltaSec = dt * 0.001;
+(obsGroundMat as any).userData?.tick?.(deltaSec);
 
-    // --- speeds & intensity ---
-    const speedMult = now < boostUntilRef.current ? BOOST_MULT : 1;
-    const extra = 0.00004 * diffFactor();
-    const slowmo = now < timeWarpUntilRef.current ? 0.45 : 1;
+
+// --- speeds & intensity ---
+// Auto ramp: baseSpeed + (t * accel) with a tiny difficulty bias (extra)
+const extra = 0.00004 * diffFactor();
+const slowmo = 1;
 const riskSpeedMult = now < riskUntilRef.current ? 1.25 : 1.0;
-const scrollSpeedBase = (baseSpeed + (t * (accel + extra))) * speedMult * riskSpeedMult;
-    const scrollSpeed = scrollSpeedBase * slowmo * (assist ? 0.92 : 1);
-    // --- Subway Surfers style chase camera ---
+const scrollSpeedBase = (baseSpeed + (t * (accel + extra))) * riskSpeedMult;
+const scrollSpeed = scrollSpeedBase * slowmo * (assist ? 0.92 : 1);
 
-// Tunables
-const baseY = 3.2;           // base camera height
-const baseZ = 7.2;           // distance behind player
-const xFollow = 0.60;        // how much cam X follows player X
-const lagPos = 0.12;         // damping for X
-const lagY   = 0.10;         // damping for Y
-const lagZ   = 0.08;         // damping for Z
-const lookAheadZ = -8.0;     // look target depth (ahead on track)
-const lookAheadX = 0.75;     // look target follows player X
-const bobAmp = 0.05;         // vertical bob amplitude
-const bankScale = 1.6;       // roll intensity on lane change
-const bankClamp = 0.20;      // max roll (radians)
 
-// subtle bob
-camBobRef.current += Math.max(0.001, dt / 1000) * 6; // ~6 Hz
-const bob = Math.sin(camBobRef.current * Math.PI * 2) * bobAmp;
+// --- Camera LOCK BLOCK ---
+{
+  // fixed targets
+  const targetY = 4
+  const targetZ = 6.5
+  const lookZ   = -12
+  const lookY   = 1.0
 
-// desired pose
-const desiredX = player.position.x * xFollow;
-const desiredY = baseY + bob + Math.min(0.7, scrollSpeed * 0.9);
-const desiredZ = baseZ;
+  // follow X a bit
+  const followX = player.position.x * 0.55
 
-// damped move
-camera.position.x += (desiredX - camera.position.x) * lagPos;
-camera.position.y += (desiredY - camera.position.y) * lagY;
-camera.position.z += (desiredZ - camera.position.z) * lagZ;
+  // move camera
+  camera.position.x += (followX - camera.position.x) * 0.12
+  camera.position.y += (targetY - camera.position.y) * 0.10
+  camera.position.z += (targetZ - camera.position.z) * 0.08
 
-// look ahead down the lane
-lookTargetRef.current.set(player.position.x * lookAheadX, 1.2, lookAheadZ);
-camera.lookAt(lookTargetRef.current);
+  // look forward, not up
+  camera.up.set(0, 1, 0)
+  lookTargetRef.current.set(player.position.x * 0.60, lookY, lookZ)
+  camera.lookAt(lookTargetRef.current)
 
-// bank (roll) from lateral velocity
-const vx = player.position.x - prevXRef.current;
-prevXRef.current = player.position.x;
-const targetBank = THREE.MathUtils.clamp(-vx * bankScale, -bankClamp, bankClamp);
-camera.rotation.z = THREE.MathUtils.lerp(camera.rotation.z, targetBank, 0.12);
+  // quick roll during lane change
+{
+  const nowMs = performance.now();
+  const remain = laneChangeAtRef.current - nowMs;
+  const k = Math.max(0, Math.min(1, remain / 220)); // 0..1
+  const roll = (laneTiltDirRef.current === 1 ? -1 : 1) * 0.06 * (k * k); // ease-out
+  camera.rotation.z = roll;
+}
 
-// mild pitch, mostly stable
-const targetPitch = -0.26 - Math.min(0.06, scrollSpeed * 0.10);
-camera.rotation.x = THREE.MathUtils.lerp(camera.rotation.x, targetPitch, 0.08);
-
-// boost FOV effect (keep your BOOST_FOV_DELTA)
-const baseFov = 62;
-const targetFovCam = baseFov + (now < boostUntilRef.current ? BOOST_FOV_DELTA : 0);
-camera.fov += (targetFovCam - camera.fov) * 0.06;
+  // remove all other pitch math
+  // keep one FOV block only
+camera.fov += (FIXED_FOV - camera.fov) * 0.08;
 camera.updateProjectionMatrix();
-    lastSpeedRef.current = scrollSpeed;
+
+}
+
 // --- background sky transition based on speed & combo ---
 if (mountRef.current) {
   // base hues per world
@@ -1165,20 +1402,11 @@ if (mountRef.current) {
     `linear-gradient(180deg, ${top} 0%, ${bot} 100%)`;
 }
 
-    // ⭐ combo perks
-if (!inSky && comboRef.current >= 3) {
-  magnetUntilRef.current = Math.max(magnetUntilRef.current, now + 180);
-}
-if (comboRef.current >= 4) {
-  // tiny time warp pulses when near obstacles
-  timeWarpUntilRef.current = Math.max(timeWarpUntilRef.current, now + 120);
-}
-
 
 // FOV zoom while boosting
-const targetFov = FIXED_FOV + (now < boostUntilRef.current ? BOOST_FOV_DELTA : 0);
-camera.fov += (targetFov - camera.fov) * 0.08;
+camera.fov += (FIXED_FOV - camera.fov) * 0.08;
 camera.updateProjectionMatrix();
+
 
 // micro camera shake on pickup/hit (decays automatically)
 if (lastPickupAtRef.current > now - 140) {
@@ -1186,7 +1414,7 @@ if (lastPickupAtRef.current > now - 140) {
   camera.position.y += (Math.random() - 0.5) * SHAKE_MAG * 0.5;
 }
 
-    updateMusic(speedMult, comboRef.current);
+updateMusic(scrollSpeed, comboRef.current);
     if (t % Math.max(300, 600 - Math.floor(300 * diffFactor())) === 0) baseSpeed += 0.05;
     if (t % 6 === 0) setSpeedView(Number(scrollSpeed.toFixed(2)));
 
@@ -1196,6 +1424,31 @@ if (lastPickupAtRef.current > now - 140) {
       (renderer.domElement.style as any).filter = `brightness(${1+flash})`;
       setTimeout(() => { (renderer.domElement.style as any).filter = ''; }, 120);
     }
+
+    // ---- composed post fx filter (flash, warning, lightning fade) ----
+{
+  let bright = 1, sat = 1, hue = 0;
+
+  // hit flash
+  if (performance.now() < hitFlashUntilRef.current) {
+    bright = Math.max(bright, 1.55);
+    sat = Math.max(sat, 1.35);
+  }
+
+  // boss warning tint
+  if (performance.now() < bossWarnUntilRef.current) {
+    hue += 22; // slight warm push
+    sat = Math.max(sat, 1.25);
+    bright = Math.max(bright, 1.12);
+  }
+
+  // optional lightning (keep your random event)
+  // (leave your lightning code as-is but instead of directly setting .filter,
+  //  just temporarily raise bright here if you want)
+
+  (renderer.domElement.style as any).filter = `brightness(${bright}) saturate(${sat}) hue-rotate(${hue}deg)`;
+}
+
 
     // --- particles (dust) ---
     for (let i = 0; i < MAX_PARTICLES; i++) {
@@ -1209,24 +1462,26 @@ if (lastPickupAtRef.current > now - 140) {
     }
     partGeo.attributes.position.needsUpdate = true;
 
-    // --- speed lines during boost ---
-    (slMat as THREE.LineBasicMaterial).opacity = speedMult > 1 ? 0.38 : 0.0;
-    if (speedMult > 1) {
-      const attr = slGeo.getAttribute('position') as THREE.BufferAttribute;
-      for (let i = 0; i < SPEEDLINE_COUNT; i++) {
-        const idx = i * 6;
-        slPos[idx+2] += scrollSpeed * 1.8;
-        slPos[idx+5] += scrollSpeed * 1.8;
-        if (slPos[idx+2] > 4) {
-          const x = -1.6 + Math.random()*3.2;
-          const y = 0.4 + Math.random()*1.6;
-          const z = -2 - Math.random()*18;
-          slPos[idx+0]=x; slPos[idx+1]=y; slPos[idx+2]=z;
-          slPos[idx+3]=x; slPos[idx+4]=y; slPos[idx+5]=z-0.7;
-        }
-      }
-      attr.needsUpdate = true;
+// --- speed lines when fast ---
+const slOn = scrollSpeed > 0.60; // adjust threshold if you like
+(slMat as THREE.LineBasicMaterial).opacity = slOn ? 0.28 : 0.0;
+if (slOn) {
+  const attr = slGeo.getAttribute('position') as THREE.BufferAttribute;
+  for (let i = 0; i < SPEEDLINE_COUNT; i++) {
+    const idx = i * 6;
+    slPos[idx+2] += scrollSpeed * 1.8;
+    slPos[idx+5] += scrollSpeed * 1.8;
+    if (slPos[idx+2] > 4) {
+      const x = -1.6 + Math.random()*3.2;
+      const y = 0.4 + Math.random()*1.6;
+      const z = -2 - Math.random()*18;
+      slPos[idx+0]=x; slPos[idx+1]=y; slPos[idx+2]=z;
+      slPos[idx+3]=x; slPos[idx+4]=y; slPos[idx+5]=z-0.7;
     }
+  }
+  attr.needsUpdate = true;
+}
+
 
     // --- weather drift ---
     const wAttr = weatherGeo.getAttribute('position') as THREE.BufferAttribute;
@@ -1300,12 +1555,23 @@ wasGrounded = grounded || inSky;
     trailPositions[0].set(player.position.x, player.position.y, player.position.z);
     for (let i = 0; i < trailCount; i++) {
       const p = trailPositions[i];
-      const alpha = (1 - i / trailCount) * 0.35 * (speedMult > 1 ? 1.2 : 0.9);
+const alpha = (1 - i / trailCount) * 0.35 * (scrollSpeed > 0.60 ? 1.2 : 0.9);
       (trail.material as THREE.MeshBasicMaterial).opacity = alpha;
       trailMatrix.makeTranslation(p.x, p.y, p.z - i * 0.02);
       trail.setMatrixAt(i, trailMatrix);
     }
     trail.instanceMatrix.needsUpdate = true;
+
+    // combo sparkle tracer
+if (performance.now() < comboSparkleUntilRef.current) {
+  if (t % 2 === 0) {
+    emitParticle(
+      player.position.clone().add(new THREE.Vector3((Math.random()-0.5)*0.2, 0.1, -0.1)),
+      new THREE.Vector3((Math.random()-0.5)*0.02, 0.02 + Math.random()*0.02, -0.02),
+      320 + Math.random()*160
+    );
+  }
+}
 
     // --- ground scroll ---
     ground.position.z += scrollSpeed;
@@ -1381,6 +1647,8 @@ if (!inSky && now < magnetUntilRef.current) {
     }
   }
 
+
+
   // pickup collision
 const d = player.position.distanceTo(orb.mesh.position);
 const eatR = 0.45;
@@ -1388,13 +1656,31 @@ if (d < eatR) {
     orb.active = false;
     scene.remove(orb.mesh);
 
+
+
     // fx + sfx
     burst(orb.mesh.position.clone(), 12, 0.06, 420);
     (sfxRef.current?.pickup)?.play?.();
     lastPickupAtRef.current = now;
 
+
+
     // combo
     comboRef.current = Math.min(COMBO_MAX, comboRef.current + 1);
+
+    // threshold sparkles (fire only when combo actually increases on pickup)
+{
+  const prev = Math.max(0, comboRef.current - 1);
+  if (prev < 3 && comboRef.current >= 3) {
+    burst(player.position.clone().add(new THREE.Vector3(0, 0.2, -0.2)), 18, 0.08, 380);
+    comboSparkleUntilRef.current = now + 1200;
+  }
+  if (prev < 5 && comboRef.current >= 5) {
+    burst(player.position.clone().add(new THREE.Vector3(0, 0.2, -0.2)), 26, 0.10, 520);
+    comboSparkleUntilRef.current = now + 1600;
+  }
+}
+
 
     // scoring (risk + combo multipliers)
     const riskMult = now < riskUntilRef.current ? 2 : 1;
@@ -1449,24 +1735,20 @@ if (orbs.filter(o => o.active).length < 12) {
       const dz = Math.abs(o.mesh.position.z - player.position.z);
       const dx = Math.abs(o.mesh.position.x - player.position.x);
       const dy = Math.abs(o.mesh.position.y - player.position.y);
-      if (dz < 0.20 && dx < 0.45 && dy < 0.55) {
-        if (now > timeWarpUntilRef.current) timeWarpUntilRef.current = now + 700;
-        break;
-      }
     }
 
     // --- collisions ---
-    const pHeight = PLAYER_RADIUS * 2 * player.scale.y;
-    const isSlidingNow = sliding;
-    const widthFactor  = isSlidingNow ? 0.78 : 0.88;
-    const heightFactor = isSlidingNow ? 0.75 : 0.98;
-    const minHeight    = isSlidingNow ? 0.16 : 0.24;
-    const pSize = new THREE.Vector3(
-      PLAYER_RADIUS * 2 * widthFactor,
-      Math.max(pHeight * heightFactor, minHeight),
-      0.72
-    );
-    playerAABB.setFromCenterAndSize(player.position.clone(), pSize);
+const pHeight = PLAYER_RADIUS * 2 * player.scale.y;
+const isSlidingNow = sliding;
+const widthFactor  = isSlidingNow ? 0.75 : 0.82;
+const heightFactor = isSlidingNow ? 0.7  : 0.9;
+const minHeight    = isSlidingNow ? 0.16 : 0.22;
+const pSize = new THREE.Vector3(
+  PLAYER_RADIUS * 2 * widthFactor,
+  Math.max(pHeight * heightFactor, minHeight),
+  0.55 // shorter Z-depth to allow dodging between close obstacles
+);
+playerAABB.setFromCenterAndSize(player.position.clone(), pSize);
 
     const expandedAABB = playerAABB.clone();
     const zPad = scrollSpeed * 0.25;
@@ -1493,8 +1775,11 @@ setLives(nextLives);
 livesRef.current = nextLives;
 
 invincibleUntilRef.current = now + 1000; // 1s immunity
-burst(player.position.clone(), 28, 0.07, 650);
+hitFlashUntilRef.current = now + 300;    // screen flash
+timeWarpUntilRef.current = now + 400;    // stronger slow-mo
+
 (sfxRef.current?.hit)?.play?.();
+(sfxRef.current?.hit2)?.play?.(); // deeper thump
 
 if (nextLives <= 0) { localDead = true; break; }
 
@@ -1519,7 +1804,6 @@ if (nextLives <= 0) {
       if (player.position.distanceTo(pwr.mesh.position) < 0.5) {
         pwr.active = false; scene.remove(pwr.mesh);
 if (pwr.kind === 'magnet') magnetUntilRef.current = now + MAGNET_MS;
-if (pwr.kind === 'boost')  { boostUntilRef.current = now + BOOST_MS; playBoost(); }
 if (pwr.kind === 'shield') shieldUntilRef.current = now + SHIELD_MS;
 if (pwr.kind === 'double') doubleUntilRef.current = now + DOUBLE_MS;
 if (pwr.kind === 'risk')   riskUntilRef.current   = now + RISK_MS;
@@ -1530,14 +1814,23 @@ if (pwr.kind === 'heart')  { setLives(v => Math.min(3, v + 1)); }
 shieldMesh.visible = (now < shieldUntilRef.current) || (now < invincibleUntilRef.current);
     shieldMesh.rotation.z += 0.08;
 
+    // magnet ring pulse
+const magnetActive = now < magnetUntilRef.current;
+magnetRing.visible = magnetActive;
+if (magnetActive) {
+  const s = 0.9 + 0.14 * Math.sin(t * 0.22);
+  magnetRing.scale.setScalar(s);
+  (magnetRing.material as THREE.MeshBasicMaterial).opacity = 0.30 + 0.25 * (0.5 + 0.5 * Math.sin(t * 0.28));
+}
+
     // --- HUD & score ---
     if (t % 6 === 0) {
-      setBadgePct({
-        magnet: Math.max(0, Math.min(1, (magnetUntilRef.current - now) / MAGNET_MS)),
-        boost:  Math.max(0, Math.min(1, (boostUntilRef.current  - now) / BOOST_MS)),
-        shield: Math.max(0, Math.min(1, (shieldUntilRef.current - now) / SHIELD_MS)),
-        dbl:    Math.max(0, Math.min(1, (doubleUntilRef.current - now) / DOUBLE_MS)),
-      });
+setBadgePct({
+  magnet: Math.max(0, Math.min(1, (magnetUntilRef.current - now) / MAGNET_MS)),
+  shield: Math.max(0, Math.min(1, (shieldUntilRef.current - now) / SHIELD_MS)),
+  dbl:    Math.max(0, Math.min(1, (doubleUntilRef.current - now) / DOUBLE_MS)),
+});
+
       const timeSincePickup = now - lastPickupAtRef.current;
       const pct = 1 - Math.min(1, timeSincePickup / COMBO_WINDOW_MS);
       const mult = 1 + Math.min(COMBO_MAX, comboRef.current) * 0.2;
@@ -1547,11 +1840,27 @@ shieldMesh.visible = (now < shieldUntilRef.current) || (now < invincibleUntilRef
 // distance score baseline
     if (!localDead) localScore = Math.max(localScore, Math.floor(t * 0.05));
 
+    // pre-warning about incoming boss burst
+if (bossWarnedForRef.current !== nextBossAtScore && localScore >= nextBossAtScore - 60) {
+  bossWarnedForRef.current = nextBossAtScore;
+  bossWarnUntilRef.current = performance.now() + 1500; // 1.5s warning
+  setBossWarning(true);
+  sfxRef.current?.warn?.play?.();
+}
+if (bossWarning && performance.now() > bossWarnUntilRef.current) {
+  setBossWarning(false);
+}
+
 // Boss bursts at score milestones
+
 if (localScore >= nextBossAtScore) {
-  // start just ahead of the furthest obstacle
   const farZ = obstacles.reduce((min, o) => (o.active ? Math.min(min, o.mesh.position.z) : min), -10);
   spawnBossBurst(Math.min(farZ, -20) - 16);
+
+  // reset warning state
+  setBossWarning(false);
+  bossWarnUntilRef.current = 0;
+
   nextBossAtScore += 350;
 }
 
@@ -1579,19 +1888,25 @@ loadBoard();
     rafRef.current = requestAnimationFrame(animate);
 
 cleanupRef.current = () => {
-  startedRef.current = false; // allow next start
+  startedRef.current = false;
 
+  // stop loops and listeners
   stopMusic();
   if (rafRef.current) cancelAnimationFrame(rafRef.current);
   window.removeEventListener('keydown', onKey);
   window.removeEventListener('pointerdown', onPointer);
   renderer.domElement.removeEventListener('touchstart', onTouchStart as any);
   renderer.domElement.removeEventListener('touchmove', onTouchMove as any);
-  renderer.dispose();
-  mount.innerHTML = '';
-};
+  window.removeEventListener('resize', onResize);
 
-  }, [size, quality, colors, world, dailySeed, assist, upg.jump, upg.magnet, upg.slide]);
+  // dispose renderer and remove only the canvas
+  renderer.dispose();
+  if (renderer.domElement.parentNode) {
+    renderer.domElement.parentNode.removeChild(renderer.domElement);
+  }
+
+};
+}
 
 useEffect(() => {
   if (!running) return;
@@ -1615,7 +1930,7 @@ const handleStart = async () => {
         src: [`/sounds/${file}`],   // put files in /public/sounds/
         volume: vol,
         preload: true,
-        html5: true,                 // more forgiving on mobile
+        html5: false,                 // more forgiving on mobile
         onloaderror: (_id, err) => console.warn('SFX load error:', file, err),
         onplayerror: (_id, err) => {
           console.warn('SFX play error (retry on unlock):', file, err);
@@ -1631,6 +1946,9 @@ const handleStart = async () => {
       slide:  makeSfx('slide.mp3',  0.30),
       hit:    makeSfx('hit.mp3',    0.45),
       boost:  makeSfx('boost.mp3',  0.35),
+      whoosh: makeSfx('whoosh.mp3', 0.35),
+warn:   makeSfx('warn.mp3',   0.5),
+hit2:   makeSfx('hit_bass.mp3', 0.5),
       music:  new Howl({
         src: ['/sounds/theme.mp3'],
         loop: true,
@@ -1640,6 +1958,9 @@ const handleStart = async () => {
         onloaderror: (_id, err) => console.warn('Music load error:', err),
       }),
     };
+
+    // honor the current start-screen setting
+try { Howler.mute(!musicOn); } catch {}
 
     setLives(3);
     livesRef.current = 3;
@@ -1680,7 +2001,6 @@ const handleRetry = () => {
   flyUntilRef.current = 0;
 
   magnetUntilRef.current = 0;
-  boostUntilRef.current  = 0;
   shieldUntilRef.current = 0;
   doubleUntilRef.current = 0;
   riskUntilRef.current   = 0;
@@ -1726,72 +2046,87 @@ const handleRetry = () => {
           }}
         />
 
-        {/* HUD Top Row */}
-<div style={{ position: 'absolute', top: 8, left: 10, right: 10, display: 'flex', justifyContent: 'space-between', gap: 12, fontWeight: 700 }}>
-  <span>Score {score}</span>
-  <span>Best {best}</span>
-  <span>Speed {speedView}</span>
-  <span>Lives {'❤'.repeat(lives)}{Array.from({length: Math.max(0, 3 - lives)}).map((_,i)=>'♡')}</span>
-</div>
+{/* HUD Top Row (hidden on home menu) */}
+{(running || paused) && !dead && countdown === null && !showTitle && (
+  <div style={hudWrap}>
+  <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+    <div style={hudStat}>Score <b>{score}</b></div>
+    <div style={hudStat}>Best <b>{best}</b></div>
+    <div style={hudStat}>Speed <b>{speedView}</b></div>
+    <div style={hudStat}>Lives <b>{'❤'.repeat(lives)}{Array.from({length: Math.max(0, 3 - lives)}).map((_,i)=>'♡')}</b></div>
+  </div>
+   <div />
+  </div>
+)}
 
-<div style={{ position: 'absolute', top: 24, left: 10, fontSize: 12, opacity: 0.8 }}>
-  <span style={{ display: 'inline-block', marginRight: 10 }}>
-    ▢ with glow = Air obstacle
-  </span>
-  <span>● on ground = Air marker</span>
-</div>
+{/* small legend, tucked under (hidden on home menu) */}
+{(running || paused) && !dead && countdown === null && !showTitle && (
+  <div style={{ position: 'absolute', top: 56, left: 14, fontSize: 11, opacity: 0.7, zIndex: 12 }}>
+    <span style={{ marginRight: 12 }}>▢ glow = air obstacle</span>
+    <span>● ground disk = air marker</span>
+  </div>
+)}
 
-        {/* Power-up badges */}
-        <div style={{ position: 'absolute', top: 36, left: 0, right: 0, display: 'flex', justifyContent: 'center', gap: 8 }}>
-          <Badge color="#ffda6b" label="Magnet" pct={badgePct.magnet} />
-          <Badge color="#00ffd0" label="Boost" pct={badgePct.boost} />
-          <Badge color="#8be9fd" label="Shield" pct={badgePct.shield} />
-          <Badge color="#ff66d9" label="Double" pct={badgePct.dbl} />
-        </div>
 
-{/* Start / Pause / (no Settings in modes) */}
-<div style={{ position: 'absolute', top: 8, right: 10, display: 'flex', gap: 8 }}>
-  {running || paused ? (
-    <>
-      <button onClick={() => setPaused(p => !p)} style={chip}>{paused ? 'Resume' : 'Pause'}</button>
-      <button onClick={() => { setShowBoard(true); }} style={chip}>Leaderboard</button>
-    </>
-  ) : (
-    <>
-      <button onClick={handleStart} style={chip}>Start</button>
-      <button onClick={() => { setShowBoard(true); }} style={chip}>Leaderboard</button>
-    </>
-  )}
-</div>
 
-        {/* Combo meter */}
-        <div style={{ position: 'absolute', left: 10, right: 10, bottom: 12 }}>
-          <ComboBar mult={comboInfo.mult} pct={comboInfo.pct} />
-        </div>
+{/* Power-up badges (hidden on home menu) */}
+{(running || paused) && !dead && countdown === null && !showTitle && (
+  <div style={{ position: 'absolute', top: 84, left: 10, display: 'grid', gap: 8, zIndex: 12 }}>
+    <Badge color="#ffda6b" label="Magnet" pct={badgePct.magnet} />
+    <Badge color="#8be9fd" label="Shield" pct={badgePct.shield} />
+    <Badge color="#ff66d9" label="Double" pct={badgePct.dbl} />
+  </div>
+)}
+
+
+
+
+
+{/* Combo meter (hidden on home menu) */}
+{(running || paused) && !dead && countdown === null && !showTitle && (
+  <div style={{ position: 'absolute', left: 12, right: 12, bottom: 14, zIndex: 12 }}>
+    <ComboBar mult={comboInfo.mult} pct={comboInfo.pct} />
+  </div>
+)}
+
+
 
 {/* Title / Start Screen */}
+
 {showTitle && !running && !dead && countdown === null && (
-  <StartScreen onStart={handleStart} />
+  <StartScreen
+    onStart={handleStart}
+    musicOn={musicOn}
+    onToggleMusic={() => setMusicOn(v => !v)}
+  />
 )}
+
 
         {/* Countdown */}
         {countdown !== null && (<div style={overlay}><div style={bubble}>{countdown}</div></div>)}
 
-        {/* Game over */}
-        {dead && (
-          <div style={overlay}>
-            <div style={panel}>
-              <h3 style={{ margin: 0 }}>Game over</h3>
-              <p style={{ margin: '6px 0 12px 0' }}>Score {score}</p>
-<div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
-  <button onClick={handleRetry} style={btn}>Replay</button>
-  <button onClick={handleSubmit} style={btn}>Submit</button>
-  <button onClick={() => setShowBoard(true)} style={btn}>Leaderboard</button>
-  <button onClick={handleShare} style={btn} disabled={!canShare}>Share</button>
-</div>
-            </div>
-          </div>
-        )}
+{/* Game over */}
+{dead && (
+  <div style={overlay}>
+    <div style={panelGlass}>
+      <div style={goTitle}>Game over</div>
+      <div style={goScore}>Score {score}</div>
+
+      <div style={goRow}>
+        <button onClick={handleRetry} style={goBtnPrimary}>Replay</button>
+        <button onClick={handleSubmit} style={goBtnGhost}>Submit</button>
+        <button onClick={() => setShowBoard(true)} style={goBtnGhost}>Leaderboard</button>
+        <button
+          onClick={handleShare}
+          style={{ ...goBtnGhost, opacity: canShare ? 1 : 0.6, cursor: canShare ? 'pointer' : 'not-allowed' }}
+          disabled={!canShare}
+        >
+          Share
+        </button>
+      </div>
+    </div>
+  </div>
+)}
 
         {/* Pause overlay */}
         {paused && (
@@ -1809,15 +2144,6 @@ const handleRetry = () => {
           </div>
         )}
       </div>
-
-      {(running || paused) && (
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
-          <button onClick={tapLeft} style={btn}>Left</button>
-          <button onClick={tapJump} style={btn}>Jump</button>
-          <button onClick={tapSlide} style={btn}>Crouch</button>
-          <button onClick={tapRight} style={btn}>Right</button>
-        </div>
-      )}
 
 {SHOW_SETTINGS && showSettings && (
         <div style={drawerOverlay} onClick={() => setShowSettings(false)}>
@@ -1901,22 +2227,23 @@ const handleRetry = () => {
 function Badge({ color, label, pct }: { color: string; label: string; pct: number }) {
   const clamped = Math.max(0, Math.min(1, pct || 0));
   return (
-    <div style={{
-      display: 'grid',
-      gridTemplateColumns: 'auto 120px',
-      alignItems: 'center',
-      gap: 6,
-      padding: '4px 8px',
-      borderRadius: 10,
-      border: '1px solid #333',
-      background: '#111',
-      color: '#fff',
-      fontSize: 12,
-    }}>
+<div style={{
+  display: 'grid',
+  gridTemplateColumns: 'auto 120px',
+  alignItems: 'center',
+  gap: 6,
+  padding: '6px 10px',
+  borderRadius: 12,
+  border: '1px solid #2a2a2a',
+  background: 'rgba(12,12,16,0.65)',
+  backdropFilter: 'blur(6px)',
+  color: '#fff',
+  fontSize: 12,
+}}>
       <span style={{ width: 10, height: 10, borderRadius: 999, background: color }} />
-      <div style={{ width: 120, height: 8, borderRadius: 6, background: '#222', overflow: 'hidden' }}>
-        <div style={{ width: `${clamped * 100}%`, height: '100%', background: color }} />
-      </div>
+<div style={{ width: 120, height: 8, borderRadius: 999, background: '#1a1a1a', overflow: 'hidden', border: '1px solid #2a2a2a' }}>
+  <div style={{ width: `${clamped * 100}%`, height: '100%', background: color }} />
+</div>
       <span style={{ marginLeft: 6, fontWeight: 700 }}>{label}</span>
     </div>
   );
@@ -1925,59 +2252,189 @@ function Badge({ color, label, pct }: { color: string; label: string; pct: numbe
 function ComboBar({ mult, pct }: { mult: number; pct: number }) {
   const w = Math.max(0, Math.min(1, pct || 0)) * 100;
   return (
-    <div style={{ display: 'grid', gap: 6, color: '#fff', fontWeight: 700 }}>
+<div style={{
+  display: 'grid',
+  gap: 6,
+  color: '#fff',
+  fontWeight: 700,
+  padding: 8,
+  borderRadius: 12,
+  border: '1px solid #222',
+  background: 'rgba(10,10,14,0.55)',
+  backdropFilter: 'blur(6px)',
+}}>
       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
         <span>Combo</span><span>x{mult.toFixed(2)}</span>
       </div>
-      <div style={{ width: '100%', height: 10, background: '#222', borderRadius: 8, overflow: 'hidden', border: '1px solid #333' }}>
-        <div style={{ width: `${w}%`, height: '100%', background: 'linear-gradient(90deg, #ffe066, #6e59ff)' }} />
+<div style={{ width: '100%', height: 12, background: '#1a1a1a', borderRadius: 999, overflow: 'hidden', border: '1px solid #2a2a2a' }}>
+  <div style={{ width: `${w}%`, height: '100%', background: 'linear-gradient(90deg, #ffe066, #6e59ff)' }} />
+</div>
+    </div>
+  );
+}
+
+function StartScreen({
+  onStart,
+  musicOn,
+  onToggleMusic,
+}: {
+  onStart: () => void;
+  musicOn: boolean;
+  onToggleMusic: () => void;
+}) {
+  // simple neon helpers
+  const neonTitle: React.CSSProperties = {
+    fontSize: 56,
+    lineHeight: 1,
+    fontWeight: 900,
+    letterSpacing: 2,
+    color: '#ff5ad9',
+    textShadow:
+      '0 0 10px #ff4bd3, 0 0 20px #ff4bd3, 0 0 35px #ff4bd3, 0 0 55px #ff4bd3',
+    transform: 'skewX(-6deg)',
+  };
+
+  const neonBtn: React.CSSProperties = {
+    padding: '18px 40px',
+    borderRadius: 18,
+    border: '1px solid rgba(255,255,255,0.2)',
+    background:
+      'linear-gradient(180deg, rgba(255,255,255,0.06), rgba(0,0,0,0.35))',
+    color: '#fff',
+    fontSize: 26,
+    fontWeight: 900,
+    letterSpacing: 1,
+    boxShadow:
+      '0 6px 22px rgba(255, 90, 217, 0.25), inset 0 0 0 1px rgba(255,255,255,0.02)',
+    backdropFilter: 'blur(6px)',
+    WebkitBackdropFilter: 'blur(6px)',
+    cursor: 'pointer',
+  };
+
+  const softPanel: React.CSSProperties = {
+    padding: 18,
+    borderRadius: 14,
+    border: '1px solid rgba(255,255,255,0.13)',
+    background: 'rgba(10,10,16,0.45)',
+    color: '#e8e8f0',
+    fontWeight: 700,
+    boxShadow: '0 10px 28px rgba(0,0,0,0.35)',
+    backdropFilter: 'blur(8px)',
+    WebkitBackdropFilter: 'blur(8px)',
+  };
+
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        inset: 0,
+        // <<<— replace this URL with your PNG path if different
+        background: `url('/media/start_bg.png') center/cover no-repeat, linear-gradient(180deg,#0b0b12 0%, #0a0a0a 100%)`,
+        display: 'grid',
+        gridTemplateRows: '1fr auto 1fr',
+        padding: 20,
+      }}
+    >
+
+{/* Top area with logo/title */}
+<div style={{
+  display: 'grid',
+  placeItems: 'center',
+  textAlign: 'center',
+  marginTop: 40,
+}}>
+  <div
+    style={{
+      fontSize: 64,
+      fontWeight: 900,
+      letterSpacing: 2,
+      color: '#ff66ff',
+      textShadow: `
+        0 0 10px #ff33ff,
+        0 0 20px #ff33ff,
+        0 0 40px #ff33ff,
+        0 0 60px #ff33ff,
+        0 0 80px #ff33ff`,
+      textTransform: 'uppercase',
+    }}
+  >
+    HYPER RUN
+  </div>
+</div>
+
+
+<div style={{ display: 'grid', placeItems: 'center', gap: 18 }}>
+  <button onClick={onStart} style={neonBtn}>
+    START
+  </button>
+
+  <div
+    style={{
+      ...softPanel,
+      fontSize: 14,
+      opacity: 0.9,
+      textAlign: 'center',
+      marginBottom: 8,
+    }}
+  >
+    Dodge • Jump • Slide — chain combos for speed
+  </div>
+
+  <button
+    style={{
+      padding: '12px 28px',
+      borderRadius: 14,
+      fontWeight: 900,
+      fontSize: 14,
+      border: '1px solid #00ff88',
+      background: 'linear-gradient(180deg,#00ff88 0%,#008844 100%)',
+      color: '#000',
+      boxShadow: '0 0 18px rgba(0,255,136,0.6), 0 0 30px rgba(0,255,136,0.3)',
+      cursor: 'pointer',
+    }}
+    onClick={() => {
+      // open wallet connection logic
+      console.log('connect wallet clicked');
+    }}
+  >
+    CONNECT WALLET
+  </button>
+</div>
+
+
+      {/* Bottom bar: left/right small buttons + center music toggle */}
+      <div
+        style={{
+          position: 'relative',
+          display: 'grid',
+          gridTemplateColumns: '1fr auto 1fr',
+          alignItems: 'end',
+        }}
+      >
+
+        {/* center */}
+        <div style={{ display: 'grid', placeItems: 'center', gap: 8 }}>
+          <button
+            onClick={onToggleMusic}
+            style={{
+              ...softPanel,
+              padding: '10px 14px',
+              fontSize: 12,
+              fontWeight: 900,
+              minWidth: 120,
+              textAlign: 'center',
+            }}
+          >
+            MUSIC {musicOn ? 'ON' : 'OFF'}
+          </button>
+          <div style={{ fontSize: 12, opacity: 0.8, color: '#d7d7e0' }}>
+          </div>
+        </div>
       </div>
     </div>
   );
 }
 
-function StartScreen({ onStart }: { onStart: () => void }) {
-  return (
-    <div style={{
-      position: 'absolute',
-      inset: 0,
-      display: 'grid',
-      placeItems: 'center',
-      background: 'linear-gradient(180deg, #0b0b12 0%, #0a0a0a 100%)'
-    }}>
-      <div style={{
-        textAlign: 'center',
-        padding: 20,
-        borderRadius: 16,
-        border: '1px solid #222',
-        background: '#0f0f12aa',
-        color: '#fff',
-        minWidth: 260
-      }}>
-        <div style={{ fontSize: 28, fontWeight: 900, letterSpacing: 1, marginBottom: 6 }}>
-          HYPER RUN
-        </div>
-        <div style={{ opacity: 0.8, marginBottom: 16 }}>
-          Dodge • Jump • Slide — chain combos for speed
-        </div>
-        <button onClick={onStart} style={{
-          padding: '14px 28px',
-          borderRadius: 16,
-          border: '1px solid #444',
-          background: '#1a1a1a',
-          color: '#fff',
-          fontSize: 20,
-          fontWeight: 800
-        }}>
-          Tap / Click to Start
-        </button>
-        <div style={{ marginTop: 12, fontSize: 12, opacity: 0.7 }}>
-          Press ←/→ to switch lanes • Space to jump • ↓ to slide
-        </div>
-      </div>
-    </div>
-  );
-}
 
 /* ------------ Styles ------------ */
 const chip: React.CSSProperties = {
@@ -1996,8 +2453,101 @@ const bubble: React.CSSProperties = {
   width: 140, height: 140, display: 'grid', placeItems: 'center', fontSize: 64, borderRadius: 999, background: '#0008', border: '1px solid #333', color: '#fff',
 };
 const panel: React.CSSProperties = {
-  background: '#111', border: '1px solid #222', borderRadius: 16, padding: 16, minWidth: 220, textAlign: 'center',
+  background: 'rgba(12,12,16,0.8)',
+  backdropFilter: 'blur(8px)',
+  border: '1px solid #232323',
+  borderRadius: 18,
+  padding: 18,
+  minWidth: 240,
+  textAlign: 'center',
+  boxShadow: '0 10px 30px rgba(0,0,0,0.35)',
 };
+const panelGlass: React.CSSProperties = {
+  background: 'linear-gradient(180deg, rgba(16,16,24,0.75) 0%, rgba(10,10,16,0.75) 100%)',
+  backdropFilter: 'blur(12px)',
+  border: '1px solid rgba(255,255,255,0.08)',
+  borderRadius: 18,
+  padding: 20,
+  minWidth: 300,
+  textAlign: 'center',
+  boxShadow: '0 20px 60px rgba(0,0,0,0.45), inset 0 1px 0 rgba(255,255,255,0.05)',
+  color: '#fff',
+};
+
+const goTitle: React.CSSProperties = {
+  fontSize: 22,
+  fontWeight: 900,
+  letterSpacing: 0.4,
+  marginBottom: 6,
+  textShadow: '0 2px 10px rgba(0,0,0,0.35)',
+};
+
+const goScore: React.CSSProperties = {
+  fontSize: 14,
+  opacity: 0.9,
+  marginBottom: 16,
+};
+
+const goRow: React.CSSProperties = {
+  display: 'flex',
+  gap: 10,
+  flexWrap: 'wrap',
+  justifyContent: 'center',
+};
+
+const goBtnBase: React.CSSProperties = {
+  padding: '10px 14px',
+  borderRadius: 12,
+  fontWeight: 800,
+  border: '1px solid rgba(255,255,255,0.12)',
+  background: 'rgba(20,20,28,0.6)',
+  color: '#fff',
+  boxShadow: '0 6px 20px rgba(0,0,0,0.35)',
+  transition: 'transform 120ms ease, background 120ms ease, box-shadow 120ms ease',
+};
+
+const goBtnPrimary: React.CSSProperties = {
+  ...goBtnBase,
+  background: 'linear-gradient(180deg, rgba(255,255,255,0.10), rgba(255,255,255,0.02))',
+  border: '1px solid rgba(255,255,255,0.18)',
+};
+
+const goBtnGhost: React.CSSProperties = {
+  ...goBtnBase,
+  background: 'rgba(18,18,26,0.55)',
+};
+
+const hudWrap: React.CSSProperties = {
+  position: 'absolute',
+  top: 10,
+  left: 10,
+  right: 10,
+  display: 'flex',
+  justifyContent: 'flex-start',
+  alignItems: 'center',
+  zIndex: 12,
+};
+
+const hudStat: React.CSSProperties = {
+  padding: '6px 10px',
+  borderRadius: 10,
+  border: '1px solid #2a2a2a',
+  background: 'rgba(12,12,16,0.65)',
+  backdropFilter: 'blur(6px)',
+  fontSize: 12,
+  color: '#eaeaea',
+};
+
+const hudChip: React.CSSProperties = {
+  padding: '8px 12px',
+  borderRadius: 12,
+  border: '1px solid #2a2a2a',
+  background: 'rgba(18,18,24,0.75)',
+  backdropFilter: 'blur(6px)',
+  color: '#fff',
+  fontWeight: 700,
+};
+
 const drawerOverlay: React.CSSProperties = {
   position: 'fixed', inset: 0, background: '#0008', display: 'grid', placeItems: 'end center', zIndex: 40,
 };

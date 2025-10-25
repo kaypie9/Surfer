@@ -1,16 +1,173 @@
-// components/GameClient.tsx
 'use client';
-import Runner3D from '@/components/Runner3D';
+
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import dynamic from 'next/dynamic';
+import { Overlay } from './ui/Overlay';
+
+const Runner3D = dynamic(() => import('./Runner3D'), { ssr: false });
+
+type RunnerAPI = {
+  start?: () => void;
+  pause?: () => void;
+  resume?: () => void;
+  restart?: () => void;
+  getStats?: () => { score: number; best: number; speed: number; lives?: number; world?: string };
+};
 
 export default function GameClient() {
-  const submit = async (score: number) => {
-    // call your api here if you want
-    // await fetch('/api/score', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ score }) });
-    console.log('score', score);
+  const apiRef = useRef<RunnerAPI | null>(null);
+
+  const [score, setScore] = useState(0);
+  const [best, setBest] = useState(0);
+  const [speed, setSpeed] = useState(0);
+  const [lives, setLives] = useState<number | undefined>(undefined);
+  const [world, setWorld] = useState<string | undefined>(undefined);
+  const bgVideoRef = React.useRef<HTMLVideoElement | null>(null);
+  const [isReady, setIsReady] = useState(true);
+  const [isRunning, setIsRunning] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const [isDead, setIsDead] = useState(false);
+
+  // receive lightweight ticks from Runner3D if it emits them
+  const handleTick = useCallback((s: { score: number; best: number; speed: number; lives?: number; world?: string }) => {
+    setScore(s.score);
+    setBest(s.best);
+    setSpeed(s.speed);
+    if (typeof s.lives === 'number') setLives(s.lives);
+    if (s.world) setWorld(s.world);
+  }, []);
+
+  const handleState = useCallback((state: 'start' | 'run' | 'pause' | 'resume' | 'die' | 'restart') => {
+    if (state === 'start') {
+      setIsReady(false);
+      setIsRunning(true);
+      setIsPaused(false);
+      setIsDead(false);
+    } else if (state === 'pause') {
+      setIsPaused(true);
+    } else if (state === 'resume') {
+      setIsPaused(false);
+    } else if (state === 'die') {
+      setIsRunning(false);
+      setIsDead(true);
+    } else if (state === 'restart') {
+      setIsDead(false);
+      setIsRunning(true);
+      setIsPaused(false);
+    }
+  }, []);
+
+  // fallback key events if RunnerAPI is not implemented inside Runner3D
+  const key = (k: string) => {
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: k }));
   };
-  return (
-    <div style={{ position: 'relative' }}>
-      <Runner3D onSubmitScore={submit} />
+
+  const start = () => {
+    if (apiRef.current?.start) apiRef.current.start();
+    else key(' ');
+    handleState('start');
+  };
+
+  const pause = () => {
+    if (apiRef.current?.pause) apiRef.current.pause();
+    else key('p');
+    handleState('pause');
+  };
+
+  const resume = () => {
+    if (apiRef.current?.resume) apiRef.current.resume();
+    else key('p');
+    handleState('resume');
+  };
+
+  const restart = () => {
+    if (apiRef.current?.restart) apiRef.current.restart();
+    else key('r');
+    handleState('restart');
+  };
+
+  const left = () => key('ArrowLeft');
+  const right = () => key('ArrowRight');
+  const jump = () => key(' ');
+
+  // poll basic stats if Runner3D exposes getStats
+  useEffect(() => {
+    const t = setInterval(() => {
+      const s = apiRef.current?.getStats?.();
+      if (s) handleTick(s);
+    }, 100);
+    return () => clearInterval(t);
+  }, [handleTick]);
+
+return (
+  <div className="relative w-full h-full min-h-[calc(100vh-64px)]">
+        {/* background video */}
+    <div className="absolute inset-0 -z-10 overflow-hidden">
+      <video
+        autoPlay
+        muted
+        loop
+        playsInline
+        preload="auto"
+        poster="/media/bg-poster.jpg"
+        className="h-full w-full object-cover pointer-events-none"
+        aria-hidden="true"
+      >
+        <source src="/media/bg.webm" type="video/webm" />
+        <source src="/media/bg.mp4" type="video/mp4" />
+      </video>
+      <div className="absolute inset-0 bg-black/30" />
     </div>
-  );
+
+    <div className="absolute inset-0">
+      <Runner3D
+        {...({
+          onTick: handleTick,
+          onState: handleState,
+          apiRef: apiRef,
+        } as any)}
+      />
+    </div>
+
+    {/* top right pause button */}
+    {isRunning && !isPaused && (
+      <button
+        onClick={pause}
+        className="absolute top-3 right-3 z-20 px-3 py-2 rounded-xl bg-black/40 backdrop-blur border border-white/10 text-white"
+      >
+        pause
+      </button>
+    )}
+    {isPaused && (
+      <button
+        onClick={resume}
+        className="absolute top-3 right-3 z-20 px-3 py-2 rounded-xl bg-white text-black font-semibold"
+      >
+        resume
+      </button>
+    )}
+
+    {/* overlays */}
+    <Overlay
+      visible={isPaused}
+      title="paused"
+      primaryText="resume"
+      secondaryText="restart"
+      onPrimary={resume}
+      onSecondary={restart}
+    />
+    <Overlay
+      visible={isDead}
+      title="rip"
+      subtitle={`score ${score.toLocaleString()}`}
+      primaryText="restart"
+      secondaryText="menu"
+      onPrimary={restart}
+      onSecondary={() => {
+        setIsReady(true);
+        setIsDead(false);
+      }}
+    />
+    </div>
+);
 }
