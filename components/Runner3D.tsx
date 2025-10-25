@@ -5,6 +5,7 @@ import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import * as THREE from 'three';
 import { Howl, Howler } from 'howler';
 import { useAccount, useConnect, useDisconnect } from 'wagmi';
+import { sdk } from '@farcaster/miniapp-sdk'
 
 // STEP 1. helper to mount a full bleed background video behind the WebGL canvas
 function mountBackgroundVideo(mount: HTMLElement) {
@@ -214,6 +215,12 @@ const mountRef = useRef<HTMLDivElement | null>(null);
 const cleanupRef = useRef<(() => void) | null>(null);
 const rafRef = useRef<RAF>(null);
 const startedRef = useRef(false); // ← prevents double start
+
+useEffect(() => {
+  // tell Farcaster Mini App we are ready
+  Promise.resolve(sdk.actions.ready()).catch(() => {})
+}, [])
+
 
   // game state
   const [running, setRunning] = useState(false);
