@@ -2307,29 +2307,52 @@ function IdBadge() {
   const short = address ? address.slice(2, 7) : '-----';
 
   return (
-    <div
-      style={{
-        display: 'flex',
-        gap: 8,
-        alignItems: 'center',
-        padding: '8px 12px',
-        borderRadius: 12,
-        background:
-          'linear-gradient(180deg, rgba(255,255,255,0.18), rgba(255,255,255,0.08))',
-        boxShadow: '0 6px 24px rgba(0,0,0,0.35), inset 0 0 0 1px rgba(255,255,255,0.12)',
-        backdropFilter: 'blur(6px)',
-        WebkitBackdropFilter: 'blur(6px)',
-        color: '#fff',
-        fontWeight: 800,
-        fontSize: 12,
-      }}
-    >
+<div
+  style={{
+    display: 'flex',
+    gap: 16,
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '14px 24px',
+    minWidth: 220,
+    borderRadius: 18,
+    background:
+      'linear-gradient(180deg, rgba(255,0,255,0.25), rgba(0,0,255,0.25))',
+    boxShadow:
+      '0 0 25px rgba(255,0,255,0.4), inset 0 0 0 1px rgba(255,255,255,0.15)',
+    backdropFilter: 'blur(10px)',
+    WebkitBackdropFilter: 'blur(10px)',
+    color: '#fff',
+    fontWeight: 800,
+    fontSize: 14,
+    letterSpacing: 0.5,
+  }}
+>
+
       <span style={{ opacity: 0.8, letterSpacing: 0.4 }}>WAL</span>
-      <span style={{ padding: '3px 8px', borderRadius: 8, background: 'rgba(0,0,0,0.35)' }}>
+<span
+  style={{
+    padding: '6px 10px',
+    borderRadius: 10,
+    background: 'rgba(0,0,0,0.4)',
+    fontSize: 14,
+    minWidth: 40,
+    textAlign: 'center',
+  }}
+>
         {short}
       </span>
       <span style={{ opacity: 0.8, letterSpacing: 0.4, marginLeft: 6 }}>UID</span>
-      <span style={{ padding: '3px 8px', borderRadius: 8, background: 'rgba(0,0,0,0.35)' }}>
+<span
+  style={{
+    padding: '6px 10px',
+    borderRadius: 10,
+    background: 'rgba(0,0,0,0.4)',
+    fontSize: 14,
+    minWidth: 40,
+    textAlign: 'center',
+  }}
+>
         {fid ?? '---'}
       </span>
     </div>
@@ -2458,24 +2481,49 @@ const short = (a?: string) =>
     Dodge • Jump • Slide — chain combos for speed
   </div>
 
-<button
-  style={{
-    padding: '12px 28px',
-    borderRadius: 14,
-    fontWeight: 900,
-    fontSize: 14,
-    border: '1px solid #00ff88',
-    background: 'linear-gradient(180deg,#00ff88 0%,#008844 100%)',
-    color: '#000',
-    boxShadow: '0 0 18px rgba(0,255,136,0.6), 0 0 30px rgba(0,255,136,0.3)',
-    cursor: 'pointer',
-    opacity: isPending ? 0.7 : 1,
-  }}
-  onClick={() => { if (!isConnected && fcConnector) connect({ connector: fcConnector }); }}
-  disabled={isConnected || isPending}
->
-  {isConnected ? 'CONNECTED' : isPending ? 'CONNECTING…' : 'CONNECT WALLET'}
-</button>
+{/* CONNECTED + MUSIC TOGGLE */}
+<div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10 }}>
+  <button
+    style={{
+      padding: '12px 28px',
+      borderRadius: 14,
+      fontWeight: 900,
+      fontSize: 14,
+      border: '1px solid #00ff88',
+      background: 'linear-gradient(180deg,#00ff88 0%,#008844 100%)',
+      color: '#000',
+      boxShadow: '0 0 18px rgba(0,255,136,0.6), 0 0 30px rgba(0,255,136,0.3)',
+      cursor: 'pointer',
+      opacity: isPending ? 0.7 : 1,
+    }}
+    onClick={() => {
+      if (!isConnected && fcConnector) connect({ connector: fcConnector })
+    }}
+    disabled={isConnected || isPending}
+  >
+    {isConnected ? 'CONNECTED' : isPending ? 'CONNECTING…' : 'CONNECT WALLET'}
+  </button>
+
+  <button
+    onClick={onToggleMusic}
+    style={{
+      padding: '10px 14px',
+      fontSize: 12,
+      fontWeight: 900,
+      minWidth: 120,
+      textAlign: 'center',
+      borderRadius: 14,
+      border: '1px solid rgba(255,255,255,0.13)',
+      background: 'rgba(10,10,16,0.45)',
+      color: '#e8e8f0',
+      boxShadow: '0 10px 28px rgba(0,0,0,0.35)',
+      backdropFilter: 'blur(8px)',
+      WebkitBackdropFilter: 'blur(8px)',
+    }}
+  >
+    MUSIC {musicOn ? 'ON' : 'OFF'}
+  </button>
+</div>
 </div>
 
 
@@ -2491,25 +2539,6 @@ const short = (a?: string) =>
   <div />
 
   <div style={{ display: 'grid', placeItems: 'center', gap: 8 }}>
-    <button
-      onClick={onToggleMusic}
-      style={{
-        padding: '10px 14px',
-        fontSize: 12,
-        fontWeight: 900,
-        minWidth: 120,
-        textAlign: 'center',
-        borderRadius: 14,
-        border: '1px solid rgba(255,255,255,0.13)',
-        background: 'rgba(10,10,16,0.45)',
-        color: '#e8e8f0',
-        boxShadow: '0 10px 28px rgba(0,0,0,0.35)',
-        backdropFilter: 'blur(8px)',
-        WebkitBackdropFilter: 'blur(8px)',
-      }}
-    >
-      MUSIC {musicOn ? 'ON' : 'OFF'}
-    </button>
   </div>
 
   <div style={{ display: 'grid', justifyItems: 'end', alignItems: 'end', paddingRight: 12 }}>
