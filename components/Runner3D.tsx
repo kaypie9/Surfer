@@ -2286,6 +2286,56 @@ function ComboBar({ mult, pct }: { mult: number; pct: number }) {
   );
 }
 
+function IdBadge() {
+  const { address } = useAccount();
+  const [fid, setFid] = useState<number | null>(null);
+
+  useEffect(() => {
+    try {
+      const anySdk: any = sdk;
+      const v =
+        anySdk?.viewer?.fid ??
+        anySdk?.state?.viewer?.fid ??
+        anySdk?.context?.viewer?.fid ??
+        anySdk?.frameContext?.fid ??
+        anySdk?.params?.fid ??
+        null;
+      if (v != null) setFid(Number(v));
+    } catch {}
+  }, []);
+
+  const short = address ? address.slice(2, 7) : '-----';
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        gap: 8,
+        alignItems: 'center',
+        padding: '8px 12px',
+        borderRadius: 12,
+        background:
+          'linear-gradient(180deg, rgba(255,255,255,0.18), rgba(255,255,255,0.08))',
+        boxShadow: '0 6px 24px rgba(0,0,0,0.35), inset 0 0 0 1px rgba(255,255,255,0.12)',
+        backdropFilter: 'blur(6px)',
+        WebkitBackdropFilter: 'blur(6px)',
+        color: '#fff',
+        fontWeight: 800,
+        fontSize: 12,
+      }}
+    >
+      <span style={{ opacity: 0.8, letterSpacing: 0.4 }}>WAL</span>
+      <span style={{ padding: '3px 8px', borderRadius: 8, background: 'rgba(0,0,0,0.35)' }}>
+        {short}
+      </span>
+      <span style={{ opacity: 0.8, letterSpacing: 0.4, marginLeft: 6 }}>UID</span>
+      <span style={{ padding: '3px 8px', borderRadius: 8, background: 'rgba(0,0,0,0.35)' }}>
+        {fid ?? '---'}
+      </span>
+    </div>
+  );
+}
+
 function StartScreen({
   onStart,
   musicOn,
@@ -2429,36 +2479,44 @@ const short = (a?: string) =>
 </div>
 
 
-      {/* Bottom bar: left/right small buttons + center music toggle */}
-      <div
-        style={{
-          position: 'relative',
-          display: 'grid',
-          gridTemplateColumns: '1fr auto 1fr',
-          alignItems: 'end',
-        }}
-      >
+{/* Bottom bar with music center and id badge right */}
+<div
+  style={{
+    position: 'relative',
+    display: 'grid',
+    gridTemplateColumns: '1fr auto 1fr',
+    alignItems: 'end',
+  }}
+>
+  <div />
 
-        {/* center */}
-        <div style={{ display: 'grid', placeItems: 'center', gap: 8 }}>
-          <button
-            onClick={onToggleMusic}
-            style={{
-              ...softPanel,
-              padding: '10px 14px',
-              fontSize: 12,
-              fontWeight: 900,
-              minWidth: 120,
-              textAlign: 'center',
-            }}
-          >
-            MUSIC {musicOn ? 'ON' : 'OFF'}
-          </button>
-          <div style={{ fontSize: 12, opacity: 0.8, color: '#d7d7e0' }}>
+  <div style={{ display: 'grid', placeItems: 'center', gap: 8 }}>
+    <button
+      onClick={onToggleMusic}
+      style={{
+        padding: '10px 14px',
+        fontSize: 12,
+        fontWeight: 900,
+        minWidth: 120,
+        textAlign: 'center',
+        borderRadius: 14,
+        border: '1px solid rgba(255,255,255,0.13)',
+        background: 'rgba(10,10,16,0.45)',
+        color: '#e8e8f0',
+        boxShadow: '0 10px 28px rgba(0,0,0,0.35)',
+        backdropFilter: 'blur(8px)',
+        WebkitBackdropFilter: 'blur(8px)',
+      }}
+    >
+      MUSIC {musicOn ? 'ON' : 'OFF'}
+    </button>
+  </div>
+
+  <div style={{ display: 'grid', justifyItems: 'end', alignItems: 'end', paddingRight: 12 }}>
+    <IdBadge />
           </div>
         </div>
       </div>
-    </div>
   );
 }
 
