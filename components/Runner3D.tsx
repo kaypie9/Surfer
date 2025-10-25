@@ -217,9 +217,14 @@ const rafRef = useRef<RAF>(null);
 const startedRef = useRef(false); // ← prevents double start
 
 useEffect(() => {
-  // tell Farcaster Mini App we are ready
-  Promise.resolve(sdk.actions.ready()).catch(() => {})
+  (async () => {
+    try {
+      await sdk.actions.ready()
+    } catch {}
+  })()
 }, [])
+
+
 
 
   // game state
