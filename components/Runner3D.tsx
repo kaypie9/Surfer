@@ -2043,7 +2043,18 @@ const handleRetry = () => {
   const pausedBlur: React.CSSProperties | undefined = paused ? { filter: 'blur(4px)' } : undefined;
 
   return (
-    <div ref={containerRef} style={{ display: 'grid', gap: 10, justifyItems: 'center' }}>
+<div
+  ref={containerRef}
+  style={{
+    position: 'fixed',
+    inset: 0,
+    overflow: 'hidden',
+    display: 'grid',
+    placeItems: 'center',
+    padding: 0,
+    margin: 0,
+  }}
+>
       <div style={{ position: 'relative' }}>
         <div
         
