@@ -2115,7 +2115,7 @@ const handleRetry = async () => {
 
 const handleShare = async () => {
   try {
-    const url = window.location.origin; // your game URL (root is fine)
+    const url = 'https://farcaster.xyz/miniapps/VJBtrjo-cwfS/hyper-run'; // your game URL (root is fine)
     const text = `I scored ${score} in Hyper Run! Can you beat me?`;
 
     const result = await sdk.actions.composeCast({
