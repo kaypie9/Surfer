@@ -2290,27 +2290,58 @@ function IdBadge() {
   const { address } = useAccount();
   const [fid, setFid] = useState<number | null>(null);
 
-  useEffect(() => {
-  let active = true;
+useEffect(() => {
+  let on = true;
   (async () => {
-    try {
-      const anySdk: any = sdk;
-      const fidCandidate =
-        anySdk?.viewer?.fid ??
-        anySdk?.state?.viewer?.fid ??
-        anySdk?.context?.viewer?.fid ??
-        anySdk?.frameContext?.fid ??
-        (await anySdk?.actions?.getViewer?.())?.fid ??
+    try { await (sdk as any)?.actions?.ready?.(); } catch {}
+
+    const grab = async () => {
+      const s: any = sdk;
+      // try every known place
+      const fromSdk =
+        s?.viewer?.fid ??
+        s?.state?.viewer?.fid ??
+        s?.context?.viewer?.fid ??
+        s?.frameContext?.fid ??
+        (await s?.actions?.getViewer?.())?.fid ??
         null;
-      if (active && fidCandidate != null) setFid(Number(fidCandidate));
-    } catch (err) {
-      console.warn('failed to get fid', err);
-    }
+
+      // url fallback (?fid=123)
+      const fromUrl = Number(new URLSearchParams(location.search).get('fid') || '') || null;
+
+      return fromSdk ?? fromUrl;
+    };
+
+    // first attempt
+    let v = await grab();
+    if (on && v != null) setFid(Number(v));
+
+    // small poll in case sdk populates a bit later
+    const timer = setInterval(async () => {
+      if (!on || fid !== null) return;
+      const w = await grab();
+      if (w != null) {
+        clearInterval(timer);
+        if (on) setFid(Number(w));
+      }
+    }, 400);
+
+    // event hook if available
+    const off = (sdk as any)?.events?.on?.('context', (ctx: any) => {
+      if (!on) return;
+      const f = ctx?.viewer?.fid ?? ctx?.fid ?? null;
+      if (f != null) setFid(Number(f));
+    });
+
+    return () => {
+      on = false;
+      try { clearInterval(timer); } catch {}
+      try { (sdk as any)?.events?.off?.('context', off); } catch {}
+    };
   })();
-  return () => {
-    active = false;
-  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
 }, []);
+
 
 const short = address ? `0x${address.slice(2, 7)}` : '-----';
 
