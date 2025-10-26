@@ -43,9 +43,9 @@ export async function GET() {
 
     miniapp: {
       version: '1',
-      name: 'Flappy Mini',
-      subtitle: 'tap to fly',
-      description: 'flappy style mini app',
+      name: 'Hyper Run',
+      subtitle: 'run',
+      description: 'Hyper run mini app',
       screenshotUrls: [`${ROOT}/screenshot-portrait.png`],
       iconUrl: `${ROOT}/icon.png`,
       splashImageUrl: `${ROOT}/splash.png`,
