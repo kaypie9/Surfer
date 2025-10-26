@@ -4,7 +4,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { sdk } from '@farcaster/miniapp-sdk';
 
-const LS_KEY = 'hyperrun:addMiniAppPrompt:v1';
+const LS_KEY = 'hyperrun:addMiniAppPrompt:added';
 
 export default function AddMiniAppPrompt() {
   const [open, setOpen] = useState(false);
@@ -15,10 +15,9 @@ export default function AddMiniAppPrompt() {
 
     async function init() {
       try {
-        // show only inside a mini app host and only once
-const inMini = await sdk.isInMiniApp() === true;
-        const already = localStorage.getItem(LS_KEY) === 'done';
-        if (!ignore && inMini && !already) setOpen(true);
+        const inMini = (await sdk.isInMiniApp()) === true;
+        const added = localStorage.getItem(LS_KEY) === 'yes';
+        if (!ignore && inMini && !added) setOpen(true);
       } catch {
         /* no-op */
       }
@@ -32,20 +31,20 @@ const inMini = await sdk.isInMiniApp() === true;
   const handleConfirm = useCallback(async () => {
     try {
       setBusy(true);
-      // this triggers the host prompt to add your app
       await sdk.actions.addMiniApp();
-      localStorage.setItem(LS_KEY, 'done');
+      // mark as added only after confirm flow
+      localStorage.setItem(LS_KEY, 'yes');
       setOpen(false);
     } catch {
-      // keep modal open so user can retry
+      // user dismissed native prompt or host error
+      // do not set flag so it will show next launch
     } finally {
       setBusy(false);
     }
   }, []);
 
   const handleCancel = useCallback(() => {
-    // snooze for this device
-    localStorage.setItem(LS_KEY, 'done');
+    // just close for now, no flag, so it will appear next launch
     setOpen(false);
   }, []);
 
