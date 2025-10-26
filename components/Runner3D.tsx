@@ -4,8 +4,9 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 import { Howl, Howler } from 'howler';
-import { useAccount, useConnect, useDisconnect, useSendTransaction } from 'wagmi';
+import { useAccount, useConnect, useDisconnect, useSendTransaction, useWaitForTransactionReceipt } from 'wagmi';
 import { sdk } from '@farcaster/miniapp-sdk'
+import { parseEther } from 'viem';
 
 // STEP 1. helper to mount a full bleed background video behind the WebGL canvas
 function mountBackgroundVideo(mount: HTMLElement) {
@@ -236,6 +237,20 @@ useEffect(() => {
   const [speedView, setSpeedView] = useState(0);
   const [countdown, setCountdown] = useState<number | null>(null);
   const [showTitle, setShowTitle] = useState(true);
+const [isPaying, setIsPaying] = useState(false);
+const [payHash, setPayHash] = useState<`0x${string}` | undefined>(undefined);
+const wait = useWaitForTransactionReceipt({ hash: payHash, confirmations: 1 });
+
+useEffect(() => {
+  if (wait.isSuccess) {
+    setIsPaying(false);
+    setDead(false); setScore(0);
+    setRunning(false); setPaused(false);
+    setCountdown(null);
+    setTimeout(() => setCountdown(countdownSeconds), 0); // start after 1+ conf
+    setPayHash(undefined);
+  }
+}, [wait.isSuccess, countdownSeconds]);
 
   // --- tx helpers ---
 const { address } = useAccount();
@@ -250,18 +265,19 @@ function toHexAscii(s: string) {
 }
 
 const fireTx = useCallback(
-  async (tag: 'START' | 'REPLAY') => {
+  async (tag: 'START' | 'REPLAY'): Promise<`0x${string}` | undefined> => {
+    if (!address) return undefined;
     try {
-      if (!address) return;
-
-      await sendTransactionAsync({
+      const hash = await sendTransactionAsync({
         account: address as `0x${string}`,
-        to: '0xf4F61BC26d2Fed02BEE82E88EFA4D9ac002c3185' as `0x${string}`,
-        value: BigInt(0.0001 * 1e18), // sends 0.0001 ETH
+        to: '0xf4F61BC26d2Fed02BEE82E88EFA4D9ac002c3185',
+        value: parseEther('0.00001'),
         data: toHexAscii(`HYPER_RUN_${tag}`) as `0x${string}`,
       });
+      return hash as `0x${string}`;
     } catch (e) {
       console.warn('tx failed', e);
+      return undefined;
     }
   },
   [address, sendTransactionAsync]
@@ -1961,29 +1977,23 @@ useEffect(() => {
 
 const handleStart = async () => {
   setShowTitle(false);
-  // make sure the WebAudio context is unlocked on the user click
   try { await (Howler as any).ctx?.resume?.(); } catch {}
+
   if (!audioReadyRef.current) {
     Howler.mute(false);
     Howler.volume(1.0);
-
-    // helper to build sfx with preload + html5 fallback + error logs
     const makeSfx = (file: string, vol = 0.4) => {
       let h!: Howl;
       h = new Howl({
-        src: [`/sounds/${file}`],   // put files in /public/sounds/
+        src: [`/sounds/${file}`],
         volume: vol,
         preload: true,
-        html5: false,                 // more forgiving on mobile
+        html5: false,
         onloaderror: (_id, err) => console.warn('SFX load error:', file, err),
-        onplayerror: (_id, err) => {
-          console.warn('SFX play error (retry on unlock):', file, err);
-          h.once('unlock', () => h.play());
-        },
+        onplayerror: (_id, err) => { console.warn('SFX play error:', file, err); h.once('unlock', () => h.play()); },
       });
       return h;
     };
-
     sfxRef.current = {
       jump:   makeSfx('jump.mp3',   0.45),
       pickup: makeSfx('pickup.mp3', 0.35),
@@ -1991,70 +2001,58 @@ const handleStart = async () => {
       hit:    makeSfx('hit.mp3',    0.45),
       boost:  makeSfx('boost.mp3',  0.35),
       whoosh: makeSfx('whoosh.mp3', 0.35),
-warn:   makeSfx('warn.mp3',   0.5),
-hit2:   makeSfx('hit_bass.mp3', 0.5),
-      music:  new Howl({
-        src: ['/sounds/theme.mp3'],
-        loop: true,
-        volume: 0.45,
-        preload: true,
-        html5: true,
-        onloaderror: (_id, err) => console.warn('Music load error:', err),
-      }),
+      warn:   makeSfx('warn.mp3',   0.5),
+      hit2:   makeSfx('hit_bass.mp3', 0.5),
+      music:  new Howl({ src: ['/sounds/theme.mp3'], loop: true, volume: 0.45, preload: true, html5: true, onloaderror: (_id, err) => console.warn('Music load error:', err) }),
     };
-
-    // honor the current start-screen setting
-try { Howler.mute(!musicOn); } catch {}
-
-    setLives(3);
-    livesRef.current = 3;
-invincibleUntilRef.current = 0;
-flyUntilRef.current = 0;
-
-    // quick sanity check so you hear *something* immediately
+    try { Howler.mute(!musicOn); } catch {}
+    setLives(3); livesRef.current = 3;
+    invincibleUntilRef.current = 0;
+    flyUntilRef.current = 0;
     sfxRef.current.jump?.play();
-
     sfxRef.current.music?.play();
     audioReadyRef.current = true;
   }
 
-  setWorld(prev => pickRandomWorld(prev)); // new world each run
-
-  // reset & start countdown
+  setWorld(prev => pickRandomWorld(prev));
   setDead(false); setScore(0);
   setRunning(false); setPaused(false);
   setCountdown(null);
 
-    await fireTx('START'); // << add this
-
-  setTimeout(() => setCountdown(countdownSeconds), 0);
+  // 🔒 require payment before starting
+  setIsPaying(true);
+  const hash = await fireTx('START');
+  if (!hash) {
+    // user rejected or failed — do NOT start
+    setIsPaying(false);
+    setShowTitle(true);
+    return;
+  }
+  setPayHash(hash); // countdown will begin after confirmation in the effect
 };
 
 const handleRetry = async () => {
-  // pick a new world for the next run
   setWorld(prev => pickRandomWorld(prev));
-
-  setDead(false);
-  setScore(0);
-  setRunning(false);
-  setPaused(false);
+  setDead(false); setScore(0);
+  setRunning(false); setPaused(false);
   setCountdown(null);
 
-  // fresh run state
-  setLives(3);
-  livesRef.current = 3;
-
+  setLives(3); livesRef.current = 3;
   invincibleUntilRef.current = 0;
   flyUntilRef.current = 0;
-
   magnetUntilRef.current = 0;
   shieldUntilRef.current = 0;
   doubleUntilRef.current = 0;
   riskUntilRef.current   = 0;
 
-  await fireTx('REPLAY');
-
-  setTimeout(() => setCountdown(countdownSeconds), 0);
+  // 🔒 require payment before replay
+  setIsPaying(true);
+  const hash = await fireTx('REPLAY');
+  if (!hash) {
+    setIsPaying(false);
+    return; // no replay if rejected
+  }
+  setPayHash(hash); // wait for confirmation → effect starts countdown
 };
 
   const handleSubmit = async () => { if (onSubmitScore) await onSubmitScore(score); };
@@ -2154,11 +2152,12 @@ const handleRetry = async () => {
 {/* Title / Start Screen */}
 
 {showTitle && !running && !dead && countdown === null && (
-  <StartScreen
-    onStart={handleStart}
-    musicOn={musicOn}
-    onToggleMusic={() => setMusicOn(v => !v)}
-  />
+<StartScreen
+  onStart={handleStart}
+  musicOn={musicOn}
+  onToggleMusic={() => setMusicOn(v => !v)}
+  isPaying={isPaying}
+/>
 )}
 
 
@@ -2449,11 +2448,14 @@ function StartScreen({
   onStart,
   musicOn,
   onToggleMusic,
+  isPaying,
 }: {
-  onStart: () => Promise<void> | void;
+  onStart: () => void;
   musicOn: boolean;
   onToggleMusic: () => void;
+  isPaying: boolean;
 }) {
+
 
 
 const { address, isConnected, status } = useAccount();
@@ -2552,9 +2554,9 @@ const short = (a?: string) =>
 
 
 <div style={{ display: 'grid', placeItems: 'center', gap: 18 }}>
-  <button onClick={onStart} style={neonBtn}>
-    START
-  </button>
+<button onClick={onStart} style={neonBtn} disabled={isPaying}>
+  {isPaying ? 'CONFIRM IN WALLET…' : 'START'}
+</button>
 
   <div
     style={{
