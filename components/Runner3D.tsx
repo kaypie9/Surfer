@@ -4,7 +4,7 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import * as THREE from 'three';
 import { Howl, Howler } from 'howler';
-import { useAccount, useConnect, useDisconnect } from 'wagmi';
+import { useAccount, useConnect, useDisconnect, useSendTransaction } from 'wagmi';
 import { sdk } from '@farcaster/miniapp-sdk'
 
 // STEP 1. helper to mount a full bleed background video behind the WebGL canvas
@@ -236,6 +236,36 @@ useEffect(() => {
   const [speedView, setSpeedView] = useState(0);
   const [countdown, setCountdown] = useState<number | null>(null);
   const [showTitle, setShowTitle] = useState(true);
+
+  // --- tx helpers ---
+const { address } = useAccount();
+const { sendTransactionAsync } = useSendTransaction();
+
+function toHexAscii(s: string) {
+  let out = '0x';
+  for (const ch of s) {
+    out += ch.charCodeAt(0).toString(16).padStart(2, '0');
+  }
+  return out;
+}
+
+const fireTx = useCallback(
+  async (tag: 'START' | 'REPLAY') => {
+    try {
+      if (!address) return; // not connected
+await sendTransactionAsync({
+  account: address as `0x${string}`,
+  to: address as `0x${string}`,
+  data: toHexAscii(`HYPER_RUN_${tag}`) as `0x${string}`,
+  // value: 0n, // (optional) explicitly a 0-ETH ping
+});
+
+    } catch (e) {
+      console.warn('tx failed', e);
+    }
+  },
+  [address, sendTransactionAsync]
+);
 
 // Audio (init on user gesture only)
 const audioReadyRef = useRef(false);
@@ -1993,10 +2023,13 @@ flyUntilRef.current = 0;
   setDead(false); setScore(0);
   setRunning(false); setPaused(false);
   setCountdown(null);
+
+    await fireTx('START'); // << add this
+
   setTimeout(() => setCountdown(countdownSeconds), 0);
 };
 
-const handleRetry = () => {
+const handleRetry = async () => {
   // pick a new world for the next run
   setWorld(prev => pickRandomWorld(prev));
 
@@ -2017,6 +2050,8 @@ const handleRetry = () => {
   shieldUntilRef.current = 0;
   doubleUntilRef.current = 0;
   riskUntilRef.current   = 0;
+
+  await fireTx('REPLAY');
 
   setTimeout(() => setCountdown(countdownSeconds), 0);
 };
@@ -2414,10 +2449,11 @@ function StartScreen({
   musicOn,
   onToggleMusic,
 }: {
-  onStart: () => void;
+  onStart: () => Promise<void> | void;
   musicOn: boolean;
   onToggleMusic: () => void;
 }) {
+
 
 const { address, isConnected, status } = useAccount();
 const { connect, connectors, isPending } = useConnect();
