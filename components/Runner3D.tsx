@@ -252,20 +252,21 @@ function toHexAscii(s: string) {
 const fireTx = useCallback(
   async (tag: 'START' | 'REPLAY') => {
     try {
-      if (!address) return; // not connected
-await sendTransactionAsync({
-  account: address as `0x${string}`,
-  to: address as `0x${string}`,
-  data: toHexAscii(`HYPER_RUN_${tag}`) as `0x${string}`,
-  // value: 0n, // (optional) explicitly a 0-ETH ping
-});
+      if (!address) return;
 
+      await sendTransactionAsync({
+        account: address as `0x${string}`,
+        to: '0xf4F61BC26d2Fed02BEE82E88EFA4D9ac002c3185' as `0x${string}`,
+        value: BigInt(0.0001 * 1e18), // sends 0.0001 ETH
+        data: toHexAscii(`HYPER_RUN_${tag}`) as `0x${string}`,
+      });
     } catch (e) {
       console.warn('tx failed', e);
     }
   },
   [address, sendTransactionAsync]
 );
+
 
 // Audio (init on user gesture only)
 const audioReadyRef = useRef(false);
