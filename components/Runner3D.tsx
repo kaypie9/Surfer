@@ -2039,12 +2039,21 @@ const handleStart = async () => {
 };
 
 const handleRetry = async () => {
-  setWorld(prev => pickRandomWorld(prev));
-  setDead(false); setScore(0);
-  setRunning(false); setPaused(false);
-  setCountdown(null);
+  // keep the Game Over modal visible until tx succeeds
+  setIsPaying(true);
 
-  setLives(3); livesRef.current = 3;
+  // ask wallet
+  const hash = await fireTx('REPLAY');
+  if (!hash) {
+    // user canceled or failed, keep modal open
+    setIsPaying(false);
+    return;
+  }
+
+  // wallet approved, safe to prep next run
+  setWorld(prev => pickRandomWorld(prev));
+
+  setLives(3);        livesRef.current = 3;
   invincibleUntilRef.current = 0;
   flyUntilRef.current = 0;
   magnetUntilRef.current = 0;
@@ -2052,15 +2061,11 @@ const handleRetry = async () => {
   doubleUntilRef.current = 0;
   riskUntilRef.current   = 0;
 
-  // 🔒 require payment before replay
-  setIsPaying(true);
-  const hash = await fireTx('REPLAY');
-  if (!hash) {
-    setIsPaying(false);
-    return; // no replay if rejected
-  }
-  setPayHash(hash); // wait for confirmation → effect starts countdown
+  // do not flip dead/running yet. wait for on-chain confirm
+  setPayHash(hash);   // your wait.isSuccess effect will start the countdown
 };
+
+
 
   const handleSubmit = async () => { if (onSubmitScore) await onSubmitScore(score); };
 
@@ -2180,6 +2185,7 @@ const handleRetry = async () => {
 
       <div style={goRow}>
         <button onClick={handleRetry} style={goBtnPrimary}>Replay</button>
+        {isPaying ? 'Processing…' : 'Replay'}
         <button onClick={handleSubmit} style={goBtnGhost}>Submit</button>
         <button onClick={() => setShowBoard(true)} style={goBtnGhost}>Leaderboard</button>
         <button
