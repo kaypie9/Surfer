@@ -45,6 +45,7 @@ function mountBackgroundVideo(mount: HTMLElement) {
     window.addEventListener('touchstart', resume, { once: true })
   })
 
+  
   // return a cleanup
   return () => {
     try { bgVideo.pause() } catch {}
@@ -146,6 +147,7 @@ const WORLD_THEMES: Record<WorldTheme, any> = {
     weather: 'sand',
   },
 };
+
 
 // player + movement
 const PLAYER_RADIUS = 0.36;
