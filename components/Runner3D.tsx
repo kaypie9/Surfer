@@ -205,6 +205,54 @@ type PowerKind = 'magnet' | 'boost' | 'shield' | 'double' | 'risk' | 'wings' | '
 type Power = { mesh: THREE.Mesh; aabb: THREE.Sphere; active: boolean; kind: PowerKind };
 type Crystal = { mesh: THREE.Mesh; active: boolean };
 
+function bindMobileGestures(mount: HTMLElement) {
+  let startX = 0, startY = 0, startT = 0;
+  const SWIPE_MIN = 18;
+  mount.style.touchAction = 'none';
+
+  const fireKey = (key: string) => {
+    window.dispatchEvent(new KeyboardEvent('keydown', { key }));
+    setTimeout(() => window.dispatchEvent(new KeyboardEvent('keyup', { key })), 10);
+  };
+
+  const onPointerDown = (e: PointerEvent) => {
+    startX = e.clientX;
+    startY = e.clientY;
+    startT = performance.now();
+    e.preventDefault();
+  };
+
+  const onPointerUp = (e: PointerEvent) => {
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    const ax = Math.abs(dx);
+    const ay = Math.abs(dy);
+    e.preventDefault();
+
+    if (ax < SWIPE_MIN && ay < SWIPE_MIN) return;
+
+    if (ax > ay) {
+      if (dx > 0) fireKey('ArrowRight');
+      else fireKey('ArrowLeft');
+    } else {
+      if (dy < 0) fireKey('ArrowUp');
+      else fireKey('ArrowDown');
+    }
+  };
+
+  const blockMove = (e: TouchEvent) => { e.preventDefault(); };
+
+  mount.addEventListener('pointerdown', onPointerDown, { capture: true, passive: false });
+  mount.addEventListener('pointerup',   onPointerUp,   { capture: true, passive: false });
+  mount.addEventListener('touchmove',   blockMove,     { capture: true, passive: false });
+
+  return () => {
+    mount.removeEventListener('pointerdown', onPointerDown, { capture: true } as any);
+    mount.removeEventListener('pointerup',   onPointerUp,   { capture: true } as any);
+    mount.removeEventListener('touchmove',   blockMove,     { capture: true } as any);
+  };
+}
+
 export default function Runner3D({
   width = BASE_W,
   height = BASE_H,
@@ -636,7 +684,12 @@ Object.assign(renderer.domElement.style, {
   height: '100%',
 });
 
+
 mount.appendChild(renderer.domElement);
+
+mount.id = 'game-mount';
+const unbindGestures = bindMobileGestures(mount);
+cleanupRef.current = () => { unbindGestures?.(); renderer.dispose(); };
 
 // 3) keep video sizing correct on resize
 function onResize() {
@@ -1335,16 +1388,6 @@ const onPointer = (e: PointerEvent) => {
 
     window.addEventListener('pointerdown', onPointer);
 
-    // touch slide
-    let lastY = 0;
-    const onTouchStart = (e: TouchEvent) => { lastY = e.touches[0].clientY; };
-    const onTouchMove = (e: TouchEvent) => {
-      const dy = e.touches[0].clientY - lastY;
-      if (dy > 32) { if (sliding) endSlideNow(); else beginSlide(); }
-    };
-    renderer.domElement.addEventListener('touchstart', onTouchStart, { passive: true });
-    renderer.domElement.addEventListener('touchmove', onTouchMove, { passive: true });
-
     // fps tracking for dynamic quality
     let lastFrameTime = performance.now();
     let fpsSmoothed = TARGET_FPS;
@@ -1957,13 +2000,14 @@ loadBoard();
 cleanupRef.current = () => {
   startedRef.current = false;
 
+    // new
+  try { unbindGestures?.(); } catch {}
+
   // stop loops and listeners
   stopMusic();
   if (rafRef.current) cancelAnimationFrame(rafRef.current);
   window.removeEventListener('keydown', onKey);
   window.removeEventListener('pointerdown', onPointer);
-  renderer.domElement.removeEventListener('touchstart', onTouchStart as any);
-  renderer.domElement.removeEventListener('touchmove', onTouchMove as any);
   window.removeEventListener('resize', onResize);
 
   // dispose renderer and remove only the canvas

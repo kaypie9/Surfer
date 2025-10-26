@@ -46,6 +46,13 @@ html, body {
   touch-action: manipulation;
 }
 
+html, body { overscroll-behavior: none; }
+
+#game-mount, canvas {
+  touch-action: none;
+  -ms-touch-action: none;
+}
+
 
 }
 }
