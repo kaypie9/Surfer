@@ -2069,15 +2069,27 @@ const handleRetry = async () => {
 
   const handleSubmit = async () => { if (onSubmitScore) await onSubmitScore(score); };
 
-  const handleShare = () => {
-    const cnv = mountRef.current?.querySelector('canvas');
-    if (!cnv) return;
-    const png = cnv.toDataURL('image/png');
-    const w = window.open();
-    if (w) {
-      w.document.write(`<img src="${png}" style="width:100%;height:auto;background:#000"/>`);
+const handleShare = async () => {
+  try {
+    const url = window.location.origin; // your game URL (root is fine)
+    const text = `I scored ${score} in Hyper Run! Can you beat me?`;
+
+    const result = await sdk.actions.composeCast({
+      text,
+      embeds: [url],         // up to 2 URLs
+      // channelKey: 'gaming', // optional: post to a channel
+    });
+
+    // user might cancel; result.cast will be null then
+    if (!result?.cast) {
+      // optional: toast “Share canceled”
     }
-  };
+  } catch (e) {
+    console.warn('share failed', e);
+    // optional: fallback – copy link, etc.
+  }
+};
+
 
   // mobile taps
   const tapLeft  = () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft' }));
@@ -2184,9 +2196,9 @@ const handleRetry = async () => {
       <div style={goScore}>Score {score}</div>
 
       <div style={goRow}>
-        <button onClick={handleRetry} style={goBtnPrimary}>Replay</button>
-        {isPaying ? 'Processing…' : 'Replay'}
-        <button onClick={handleSubmit} style={goBtnGhost}>Submit</button>
+        <button onClick={handleRetry} style={goBtnPrimary} disabled={isPaying}>
+          {isPaying ? 'Processing…' : 'Replay'}
+        </button>
         <button onClick={() => setShowBoard(true)} style={goBtnGhost}>Leaderboard</button>
         <button
           onClick={handleShare}
