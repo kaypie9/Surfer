@@ -265,23 +265,28 @@ function toHexAscii(s: string) {
 }
 
 const fireTx = useCallback(
-  async (tag: 'START' | 'REPLAY'): Promise<`0x${string}` | undefined> => {
-    if (!address) return undefined;
+  async (tag: 'START' | 'REPLAY') => {
     try {
+      if (!address) return null;
+
+      // 0.0001 ETH on Base
       const hash = await sendTransactionAsync({
-        account: address as `0x${string}`,
+        // send to your address
         to: '0xf4F61BC26d2Fed02BEE82E88EFA4D9ac002c3185',
-        value: parseEther('0.00001'),
-        data: toHexAscii(`HYPER_RUN_${tag}`) as `0x${string}`,
+        value: parseEther('0.00001'), // bigint
+        // if your wagmi config isn’t already on Base, force it:
+        // chainId: 8453,
       });
+
       return hash as `0x${string}`;
     } catch (e) {
       console.warn('tx failed', e);
-      return undefined;
+      return null;
     }
   },
   [address, sendTransactionAsync]
 );
+
 
 
 // Audio (init on user gesture only)
