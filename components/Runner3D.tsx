@@ -7,6 +7,8 @@ import { Howl, Howler } from 'howler';
 import { useAccount, useConnect, useDisconnect, useSendTransaction, useWaitForTransactionReceipt } from 'wagmi';
 import { sdk } from '@farcaster/miniapp-sdk'
 import { parseEther } from 'viem';
+import Leaderboard from './Leaderboard'
+
 
 // STEP 1. helper to mount a full bleed background video behind the WebGL canvas
 function mountBackgroundVideo(mount: HTMLElement) {
@@ -265,7 +267,9 @@ const bgVideoRef = useRef<HTMLVideoElement | null>(null);
 const mountRef = useRef<HTMLDivElement | null>(null);
 const cleanupRef = useRef<(() => void) | null>(null);
 const rafRef = useRef<RAF>(null);
-const startedRef = useRef(false); // ← prevents double start
+const startedRef = useRef(false);
+const submitOnceRef = useRef(false);
+
 
 useEffect(() => {
   (async () => {
@@ -367,28 +371,11 @@ const sfxRef = useRef<{
 
   // Share replay toggle
   const [canShare, setCanShare] = useState(false);
-const [showBoard, setShowBoard] = useState(false);
 // Start-screen music toggle (neon page)
 const [musicOn, setMusicOn] = useState(true);
 
-const [board, setBoard] = useState<{score:number; at:number}[]>([]);
 
-function loadBoard() {
-  try {
-    const raw = localStorage.getItem('hyper-board');
-    const arr = raw ? JSON.parse(raw) as {score:number; at:number}[] : [];
-    setBoard(arr.sort((a,b)=>b.score-a.score).slice(0, 20));
-  } catch {}
-}
-function saveScoreLocal(score:number) {
-  try {
-    const raw = localStorage.getItem('hyper-board');
-    const arr = raw ? JSON.parse(raw) as {score:number; at:number}[] : [];
-    arr.push({ score, at: Date.now() });
-    localStorage.setItem('hyper-board', JSON.stringify(arr));
-  } catch {}
-}
-useEffect(() => { loadBoard(); }, []);
+const [showOnlineLB, setShowOnlineLB] = useState(false)
 
 // Preload and mount the background video once (so Start is instant)
 useEffect(() => {
@@ -1979,20 +1966,35 @@ if (localScore >= nextBossAtScore) {
 
     if (!localDead) {
       rafRef.current = requestAnimationFrame(animate);
-    } else {
-stopMusic();
-setDead(true); setRunning(false);
-setBest(b => Math.max(b, localScore));
-setScore(localScore);
-saveScoreLocal(localScore);
-loadBoard();
-    }
-  } catch (err) {
-    console.error('Frame error:', err);
-    setPaused(true);
-    rafRef.current = requestAnimationFrame(animate);
+} else {
+  stopMusic();
+  setDead(true); setRunning(false);
+  setBest(b => Math.max(b, localScore));
+  setScore(localScore);
+
+    // submit to leaderboard (no await here)
+  if (!submitOnceRef.current) {
+    submitOnceRef.current = true;
+    const member = (address ?? 'guest').toLowerCase();
+    fetch('/api/leaderboard/submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ game: 'hyperrun', member, score: localScore }),
+      cache: 'no-store',
+    }).catch(e => console.warn('submit failed', e));
   }
-};
+
+  // keep looping
+  rafRef.current = requestAnimationFrame(animate);
+}          // close else
+} catch (err) {
+  console.error('Frame error:', err);
+  setPaused(true);
+  rafRef.current = requestAnimationFrame(animate);
+}
+}; // end animate
+
+
 
 
     rafRef.current = requestAnimationFrame(animate);
@@ -2079,6 +2081,7 @@ const handleStart = async () => {
     setShowTitle(true);
     return;
   }
+  submitOnceRef.current = false;
   setPayHash(hash); // countdown will begin after confirmation in the effect
 };
 
@@ -2106,6 +2109,7 @@ const handleRetry = async () => {
   riskUntilRef.current   = 0;
 
   // do not flip dead/running yet. wait for on-chain confirm
+  submitOnceRef.current = false;
   setPayHash(hash);   // your wait.isSuccess effect will start the countdown
 };
 
@@ -2155,21 +2159,26 @@ const handleShare = async () => {
     placeItems: 'center',
     padding: 0,
     margin: 0,
+    background: '#000', // add this
   }}
 >
+
+
       <div style={{ position: 'relative' }}>
         <div
         
-          ref={mountRef}
-          style={{
-            width: size.w,
-            height: size.h,
-            borderRadius: 16,
-            border: '1px solid #222',
-            background: `linear-gradient(${colors.bgTop}, ${colors.bgBot})`,
-            overflow: 'hidden',
-            ...pausedBlur,
-          }}
+ref={mountRef}
+style={{
+  width: size.w,
+  height: size.h,
+  borderRadius: 16,
+  // border: '1px solid #222', // remove this
+  background: `linear-gradient(${colors.bgTop}, ${colors.bgBot})`,
+  overflow: 'hidden',
+  ...pausedBlur,
+}}
+
+
         />
 
 {/* HUD Top Row (hidden on home menu) */}
@@ -2243,7 +2252,6 @@ const handleShare = async () => {
         <button onClick={handleRetry} style={goBtnPrimary} disabled={isPaying}>
           {isPaying ? 'Processing…' : 'Replay'}
         </button>
-        <button onClick={() => setShowBoard(true)} style={goBtnGhost}>Leaderboard</button>
         <button
           onClick={handleShare}
           style={{ ...goBtnGhost, opacity: canShare ? 1 : 0.6, cursor: canShare ? 'pointer' : 'not-allowed' }}
@@ -2306,6 +2314,10 @@ const handleShare = async () => {
               Upgrades — Jump: {upg.jump} • Magnet: {upg.magnet} • Slide: {upg.slide} • Streak: {streak}d
             </div>
 
+
+
+
+
 <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
   <button
     onClick={() => { setShowSettings(false); if (running) setPaused(false); }}
@@ -2319,33 +2331,6 @@ const handleShare = async () => {
           </div>
         </div>
       )}
-      {showBoard && (
-  <div style={drawerOverlay} onClick={() => setShowBoard(false)}>
-    <div style={drawer} onClick={e => e.stopPropagation()}>
-      <h3 style={{ marginTop: 0 }}>Leaderboard (Local)</h3>
-      <div style={{ maxHeight: 260, overflow: 'auto', paddingRight: 6 }}>
-        {board.length === 0 ? (
-          <div style={{ opacity: 0.7 }}>No scores yet — play a run!</div>
-        ) : (
-          <ol style={{ margin: 0, paddingLeft: 18 }}>
-            {board.map((r, i) => (
-              <li key={i} style={{ margin: '6px 0', display: 'flex', justifyContent: 'space-between' }}>
-                <span>Score {r.score}</span>
-                <span style={{ opacity: 0.7, fontSize: 12 }}>
-                  {new Date(r.at).toLocaleString()}
-                </span>
-              </li>
-            ))}
-          </ol>
-        )}
-      </div>
-      <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-        <button onClick={() => setShowBoard(false)} style={btn}>Close</button>
-        <button onClick={() => { localStorage.removeItem('hyper-board'); loadBoard(); }} style={btn}>Clear</button>
-      </div>
-    </div>
-  </div>
-)}
     </div>
   );
 }
@@ -2530,7 +2515,7 @@ function StartScreen({
 const { address, isConnected, status } = useAccount();
 const { connect, connectors, isPending } = useConnect();
 const { disconnect } = useDisconnect();
-
+const [showOnlineLB, setShowOnlineLB] = useState(false)
 const fcConnector = connectors.find(c => c.id.includes('farcaster')) ?? connectors[0];
 
 
@@ -2681,6 +2666,24 @@ const short = (a?: string) =>
   >
     MUSIC {musicOn ? 'ON' : 'OFF'}
   </button>
+
+<button
+  onClick={() => setShowOnlineLB(true)}
+  style={{
+    padding: '12px 28px',
+    borderRadius: 14,
+    fontWeight: 900,
+    fontSize: 14,
+    border: '1px solid rgba(255,255,255,0.18)',
+    background: 'rgba(18,18,26,0.55)',
+    color: '#fff',
+    boxShadow: '0 6px 20px rgba(0,0,0,0.35)',
+    cursor: 'pointer',
+    marginTop: 8,
+  }}
+>
+  LEADERBOARD
+</button>
 </div>
 </div>
 
@@ -2703,6 +2706,60 @@ const short = (a?: string) =>
     <IdBadge />
           </div>
         </div>
+{showOnlineLB && (
+  <div
+    style={{
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      width: '100%',
+      height: '100%',
+      background: 'rgba(0,0,0,0.6)',
+      backdropFilter: 'blur(6px)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      zIndex: 50,
+    }}
+    onClick={() => setShowOnlineLB(false)}
+  >
+    <div
+      onClick={e => e.stopPropagation()}
+      style={{
+        width: '85%',
+        maxWidth: 420,
+        background: 'rgba(10,10,20,0.9)',
+        border: '1px solid rgba(255,255,255,0.15)',
+        borderRadius: 20,
+        boxShadow: '0 0 40px rgba(255,100,255,0.2)',
+        padding: 20,
+        color: '#fff',
+        textAlign: 'center',
+      }}
+    >
+      <h3 style={{ fontSize: 22, fontWeight: 800, marginBottom: 10, color: '#ff73e1' }}>
+        Leaderboard
+      </h3>
+      <Leaderboard />
+      <button
+        onClick={() => setShowOnlineLB(false)}
+        style={{
+          marginTop: 20,
+          padding: '10px 20px',
+          borderRadius: 12,
+          background: 'linear-gradient(90deg,#ff73e1,#b13cff)',
+          border: 'none',
+          color: '#fff',
+          fontWeight: 700,
+          cursor: 'pointer',
+        }}
+      >
+        Close
+      </button>
+    </div>
+  </div>
+)}
+
       </div>
   );
 }

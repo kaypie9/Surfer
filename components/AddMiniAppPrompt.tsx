@@ -63,18 +63,20 @@ export default function AddMiniAppPrompt() {
         zIndex: 9999,
       }}
     >
-      <div
-        style={{
-          width: 360,
-          maxWidth: '92vw',
-          background: '#111218',
-          borderRadius: 16,
-          padding: 20,
-          color: 'white',
-          boxShadow: '0 10px 30px rgba(0,0,0,0.45)',
-          border: '1px solid rgba(255,255,255,0.08)',
-        }}
-      >
+<div
+  style={{
+    width: 320,
+    maxWidth: '92vw',
+    background: '#111218',
+    borderRadius: 14,
+    padding: 14,
+    color: 'white',
+    boxShadow: '0 6px 20px rgba(0,0,0,0.45)',
+    border: '1px solid rgba(255,255,255,0.08)',
+    transform: 'scale(0.92)', // slightly smaller overall
+  }}
+>
+
         <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 12 }}>
           <div
             style={{

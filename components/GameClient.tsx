@@ -4,6 +4,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import dynamic from 'next/dynamic';
 import { Overlay } from './ui/Overlay';
 import ConnectWallet from './ConnectWallet';
+import AddMiniAppPrompt from './AddMiniAppPrompt';
 
 const Runner3D = dynamic(() => import('./Runner3D'), { ssr: false });
 
@@ -15,9 +16,32 @@ type RunnerAPI = {
   getStats?: () => { score: number; best: number; speed: number; lives?: number; world?: string };
 };
 
+function getPlayerId() {
+  const k = 'hyperrun:player'
+  let id = localStorage.getItem(k)
+  if (!id) {
+    id = 'player_' + Math.random().toString(36).slice(2, 8)
+    localStorage.setItem(k, id)
+  }
+  return id
+}
+
+async function submitScoreToLB(score: number) {
+  try {
+    await fetch('/api/leaderboard', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ game: 'hyperrun', member: getPlayerId(), score })
+    })
+  } catch (err) {
+    console.error('leaderboard submit failed', err)
+  }
+}
+
+
 export default function GameClient() {
   const apiRef = useRef<RunnerAPI | null>(null);
-
+  const scoreRef = useRef(0)
   const [score, setScore] = useState(0);
   const [best, setBest] = useState(0);
   const [speed, setSpeed] = useState(0);
@@ -32,6 +56,7 @@ export default function GameClient() {
   // receive lightweight ticks from Runner3D if it emits them
   const handleTick = useCallback((s: { score: number; best: number; speed: number; lives?: number; world?: string }) => {
     setScore(s.score);
+    scoreRef.current = s.score
     setBest(s.best);
     setSpeed(s.speed);
     if (typeof s.lives === 'number') setLives(s.lives);
@@ -51,6 +76,7 @@ export default function GameClient() {
     } else if (state === 'die') {
       setIsRunning(false);
       setIsDead(true);
+      submitScoreToLB(scoreRef.current)
     } else if (state === 'restart') {
       setIsDead(false);
       setIsRunning(true);
@@ -101,7 +127,8 @@ export default function GameClient() {
   }, [handleTick]);
 
 return (
-  <div className="relative w-full h-full min-h-[calc(100vh-64px)]">
+  <div id="game-frame" style={{ position: 'relative', width: 'min(420px, 100%)', aspectRatio: '9 / 16', margin: '0 auto', overflow: 'hidden' }}>
+
         {/* background video */}
     <div className="absolute inset-0 -z-10 overflow-hidden">
       <video
@@ -131,13 +158,15 @@ return (
     </div>
     
         {/* connect wallet on home (menu) only */}
-    {!isRunning && !isDead && (
-      <div className="absolute left-0 right-0 z-20" style={{ top: '58%' }}>
-        <div className="flex justify-center">
-          <ConnectWallet />
-        </div>
-      </div>
-    )}
+{!isRunning && !isDead && (
+  <div className="absolute left-0 right-0 z-20" style={{ top: '58%' }}>
+    <div className="flex justify-center">
+      <ConnectWallet />
+    </div>
+  </div>
+)}
+
+
 
 
     {/* top right pause button */}
@@ -179,6 +208,7 @@ return (
         setIsDead(false);
       }}
     />
+    <AddMiniAppPrompt />
     </div>
 );
 }

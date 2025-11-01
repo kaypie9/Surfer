@@ -16,20 +16,25 @@
   }
 }
 
-body {
-  color: rgb(var(--foreground-rgb));
-  background: linear-gradient(
-      to bottom,
-      transparent,
-      rgb(var(--background-end-rgb))
-    )
-    rgb(var(--background-start-rgb));
+html, body, #__next {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: #000 !important;
+  color: #fff;
 }
+
 
 @layer utilities {
   .text-balance {
     text-wrap: balance;
   }
+
+  #screen-game, .game-wrap {
+  position: relative;
+  overflow: hidden;
+}
+
   .game-wrap {
   position: relative;
   width: 100%;
@@ -52,7 +57,115 @@ html, body { overscroll-behavior: none; }
   touch-action: none;
   -ms-touch-action: none;
 }
-
-
 }
 }
+#screen-game, #game-mount { position: relative; overflow: hidden; }
+
+#game-frame {
+  position: relative;
+  width: min(420px, 100%);
+  aspect-ratio: 9 / 16;
+  margin: 0 auto;
+  overflow: hidden;
+}
+
+#game-frame > canvas,
+#game-frame [data-game-layer] {
+  position: absolute;
+  inset: 0;
+}
+
+#game-frame > canvas { pointer-events: none; }
+
+/* Fix Add Mini App popup inside the game frame */
+#game-frame {
+  position: relative;
+  overflow: hidden;
+}
+
+.addma-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+background: transparent;
+  z-index: 50;
+}
+
+.addma-panel {
+  width: 90%;
+  max-width: 320px;
+  background: #111218;
+  border-radius: 16px;
+  padding: 18px;
+  color: #fff;
+  text-align: left;
+  border: 1px solid rgba(255,255,255,0.1);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.6);
+}
+
+.addma-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.addma-logo {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: linear-gradient(145deg,#00e0ff,#0080ff);
+  display: grid;
+  place-items: center;
+  font-weight: 800;
+}
+
+.addma-title {
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.addma-note {
+  background: #1a1b22;
+  border-radius: 10px;
+  padding: 10px;
+  font-size: 14px;
+  opacity: 0.9;
+  margin-bottom: 16px;
+}
+
+.addma-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.addma-btn {
+  flex: 1;
+  height: 42px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.addma-cancel {
+  background: #262833;
+  color: #fff;
+  border: 1px solid rgba(255,255,255,0.08);
+}
+
+.addma-ok {
+  background: linear-gradient(90deg,#6b4dff,#8a6bff);
+  color: #fff;
+  border: none;
+}
+html, body {
+  overflow: hidden !important;
+  overscroll-behavior: none;
+}
+
+<main className="grid place-items-center h-[100svh] overflow-hidden p-0">
+  <div className="p-4">
+    <GameClient />
+  </div>
+</main>
